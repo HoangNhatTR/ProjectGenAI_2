@@ -1,0 +1,47 @@
+# Cài đặt:  pip install -r requirements.txt
+# Bật venv:  .\Chatbot\Scripts\Activate.ps1   (PowerShell)
+
+# --- Parsing ---
+pypdf==6.10.2
+pdfplumber==0.11.9
+beautifulsoup4==4.14.3
+lxml==6.1.0
+pdfminer.six==20251230   # transitive của pdfplumber, pin để khoá
+python-docx>=1.1.0       # parse .docx (văn bản dự thảo / Bộ Tư pháp)
+
+# --- Retrieval ---
+rank-bm25>=0.2.2         # BM25 hybrid + RRF fusion
+
+# --- Text processing ---
+regex==2026.4.4
+Unidecode==1.4.0
+
+# --- Schema / config ---
+pydantic==2.13.3
+python-dotenv==1.2.2
+
+# --- Utils ---
+tqdm==4.67.3
+loguru==0.7.3
+
+# --- Chunking ---
+langchain-text-splitters>=0.2.0
+
+# --- Embedding (nặng ~3GB, chỉ cài khi chạy bước embedding) ---
+sentence-transformers>=3.0.0
+torch>=2.2.0
+FlagEmbedding>=1.2.10  # for BGE-M3
+
+# --- Vector DB ---
+chromadb>=0.5.0
+# qdrant-client>=1.9.0  # bật khi chuyển sang prod
+
+# --- LLM ---
+anthropic>=0.40.0
+google-genai>=2.0.0
+groq>=1.0.0
+# openai>=1.30.0  # nếu dùng OpenAI
+
+# --- Optional: API server ---
+# fastapi>=0.111.0
+# uvicorn>=0.30.0

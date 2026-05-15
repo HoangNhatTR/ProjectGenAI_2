@@ -80,3 +80,73 @@ Dưới đây là quy trình hoạt động của hệ thống khi người dùn
 * Có khả năng reasoning pháp lý (có kiểm soát)
 * Hỗ trợ phân tích bản án thực tế
 * Có thể mở rộng thành Legal AI Assistant
+
+---
+
+## Giai đoạn hiện tại: RAG đơn giản
+
+Pipeline khởi đầu (trước khi thêm Knowledge Graph):
+
+```
+Raw legal docs (PDF/HTML)
+    -> Parsing + Cleaning
+    -> Chunking (theo Điều/Khoản/Điểm)
+    -> Embedding
+    -> Vector DB (Chroma)
+    -> Retriever
+    -> LLM (sinh câu trả lời + trích dẫn nguồn)
+```
+
+### Cấu trúc thư mục
+
+```
+ProjectGenAI_2/
+├── data/
+│   ├── raw/          # PDF/HTML gốc (gitignored)
+│   ├── processed/    # JSON sau chunking (gitignored)
+│   └── vectorstore/  # Chroma persistent dir (gitignored)
+├── src/
+│   ├── schemas.py    # Pydantic models: Chunk, RawDocument, Answer, ...
+│   ├── config.py     # Đọc .env, đường dẫn, hyperparams
+│   ├── parsing.py    # PDF/HTML -> text sạch
+│   ├── chunking.py   # Chunk theo cấu trúc pháp lý
+│   ├── embedding.py  # Wrapper BGE-M3 / sentence-transformers
+│   ├── vectorstore.py# Wrapper Chroma
+│   ├── retriever.py  # Top-k + (sau này) BM25 hybrid + rerank
+│   └── generator.py  # LLM Claude + prompt + citation parsing
+├── scripts/ingest.py # Pipeline ingestion end-to-end
+├── tests/
+├── app.py            # CLI hỏi-đáp
+├── requirements.txt
+└── .env.example
+```
+
+### Cài đặt
+
+```powershell
+# 1. Tạo virtualenv
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 2. Cài dependencies
+pip install -r requirements.txt
+
+# 3. Config
+Copy-Item .env.example .env
+# rồi điền ANTHROPIC_API_KEY vào .env
+```
+
+### Sử dụng
+
+```powershell
+# Bỏ PDF/HTML vào data/raw/, sau đó:
+python -m scripts.ingest    # parse + chunk + embed + lưu vector store
+python app.py               # CLI hỏi-đáp tương tác
+```
+
+### Trạng thái
+
+Hiện tại các module trong `src/` đều là **stub** (`raise NotImplementedError`).
+Implement theo thứ tự: `parsing` -> `chunking` -> `embedding` -> `vectorstore`
+-> `retriever` -> `generator`. Mỗi bước nên có 1 test ở `tests/` xác nhận
+chạy được trên 1 file mẫu trước khi sang bước kế.

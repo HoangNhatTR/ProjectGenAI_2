@@ -1,0 +1,77 @@
+Để hệ thống của bạn thành Legal AI Agent thông minh, cần nâng từ RAG thường lên kiến trúc này:
+User message   ↓Memory + Conversation State   ↓Intent Detection   ↓Query Rewrite / Task Planning   ↓Tool Selection   ↓Retrieval / Search / Calculator / Database   ↓Reasoning + Answer Generation   ↓Citation + Validation   ↓Memory Update
+1. Các thành phần bắt buộc
+1) Memory
+Để nhớ hội thoại.
+Gồm:
+Short-term memory: vài lượt chat gần nhấtLong-term memory: thông tin bền vững của user/sessionSummary memory: tóm tắt hội thoại dài
+Ví dụ nhớ:
+{  "topic": "vượt đèn đỏ",  "vehicle": "xe máy",  "user_intent": "hỏi mức phạt"}
+
+2) Conversation State
+Để biết user đang nói về chủ đề nào.
+Ví dụ:
+{  "current_legal_topic": "vi phạm giao thông",  "act": "vượt đèn đỏ",  "vehicle_type": "xe máy",  "last_retrieved_law": "Nghị định liên quan xử phạt giao thông"}
+Cái này giúp câu hỏi kiểu:
+"thế ô tô thì sao?"
+được hiểu là:
+"mức phạt vượt đèn đỏ đối với ô tô là bao nhiêu?"
+
+3) Query Rewriter
+Biến câu hỏi mơ hồ thành câu độc lập.
+Ví dụ:
+User: "luật đấy là của ô tô hay xe máy?"
+Rewrite:
+"Các quy định xử phạt hành vi vượt đèn đỏ vừa được đề cập áp dụng cho ô tô hay xe máy?"
+
+4) Intent Detection
+Phân loại user đang muốn gì.
+Ví dụ:
+- hỏi thông tin luật- hỏi tiếp ngữ cảnh cũ- so sánh mức phạt- yêu cầu tóm tắt- yêu cầu soạn đơn/văn bản- hỏi quy trình thực hiện- hỏi tình huống cá nhân
+Vì mỗi intent cần flow khác nhau.
+
+5) Retriever tốt
+Không chỉ vector search.
+Nên dùng:
+Hybrid Retrieval = Dense Embedding + BM25Reranker = xếp hạng lại kết quảMetadata filter = lọc theo loại văn bản/ngày hiệu lực/lĩnh vực
+Với pháp luật, hybrid search rất quan trọng vì các từ khóa như “Điều 8”, “Khoản 1”, “Nghị định…” phải match chính xác.
+
+6) Tool Calling
+Agent cần biết khi nào dùng công cụ.
+Ví dụ tool:
+legal_search_tool     → tìm văn bản luậtlaw_article_lookup    → tra đúng Điều/Khoảncalculator_tool       → tính tiền phạt, thời hạndocument_drafting     → soạn đơn, hợp đồng, công vănweb_search_tool       → kiểm tra luật mới nếu cầncase_memory_tool      → lấy thông tin hồ sơ người dùng
+Không có tool calling thì chatbot chỉ là RAG nâng cấp, chưa phải agent mạnh.
+
+7) Planner / Reasoning Layer
+Agent cần biết chia bài toán thành bước.
+Ví dụ user hỏi:
+"Tôi đi xe máy vượt đèn đỏ, không mang GPLX, bị phạt tổng bao nhiêu?"
+Agent phải lập kế hoạch:
+1. Xác định hành vi 1: vượt đèn đỏ2. Xác định hành vi 2: không mang GPLX3. Tra luật từng hành vi4. Tính tổng mức phạt5. Trả lời kèm nguồn
+
+8) Citation & Grounding
+Bắt buộc với pháp luật.
+Câu trả lời nên có:
+Theo Điều/Khoản...Tên văn bản...Ngày hiệu lực...Trích dẫn ngắn...
+Và nếu không có dữ liệu thì nói:
+Tôi chưa tìm thấy căn cứ trong tài liệu hiện có.
+Không được bịa.
+
+9) Guardrails pháp lý
+Vì đây là trợ lý pháp luật, nên cần giới hạn:
+- không khẳng định thay luật sư- không bịa căn cứ- phân biệt "thông tin pháp luật" và "tư vấn pháp lý cá nhân"- cảnh báo khi thiếu dữ kiện- hỏi bổ sung khi case phụ thuộc thông tin quan trọng
+
+2. Kiến trúc practical bạn nên build
+Giai đoạn 1:
+Conversational RAG= Memory + Query Rewrite + Retriever + Answer
+Giai đoạn 2:
+Legal Agent= Conversational RAG + Intent Detection + Tools + State
+Giai đoạn 3:
+Production Agent= Legal Agent + Evaluation + Guardrails + Monitoring
+
+3. Stack đề xuất
+Framework: LangGraphRAG: LangChain / LlamaIndexVector DB: QdrantKeyword Search: Elasticsearch / OpenSearch / BM25Memory: Redis + PostgreSQLEmbedding: multilingual-e5-large hoặc bge-m3Reranker: bge-reranker / cross-encoderLLM: GPT / Claude / Gemini / local modelBackend: FastAPIFrontend: Streamlit hoặc React
+Kết luận
+Hệ thống của bạn cần 6 thứ cốt lõi trước:
+1. Memory2. Conversation State3. Query Rewrite4. Intent Detection5. Hybrid Retrieval + Reranker6. Tool Calling / Planner
+Làm được 6 phần này thì chatbot của bạn bắt đầu chuyển từ RAG hỏi đáp thành Legal AI Agent.
