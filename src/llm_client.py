@@ -239,11 +239,13 @@ class Router9Client:
     ) -> dict:
         options = options or {}
         temperature = float(options.get("temperature", 0.2))
+        top_p       = float(options.get("top_p", 1.0))
 
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
+            "top_p": top_p,
             "stream": False,   # 9Router mặc định stream, phải tắt tường minh
         }
         if format == "json":
@@ -270,10 +272,12 @@ class Router9Client:
         """Yield các chunk text khi model trả về (Server-Sent Events)."""
         options = options or {}
         temperature = float(options.get("temperature", 0.2))
+        top_p       = float(options.get("top_p", 1.0))
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
+            "top_p": top_p,
             "stream": True,
         }
         for chunk in self._client.chat.completions.create(**kwargs):

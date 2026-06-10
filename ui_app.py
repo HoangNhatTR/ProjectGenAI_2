@@ -290,6 +290,9 @@ def init_session_state(session_store: SessionStore) -> None:
     st.session_state.setdefault("use_parent_expansion", True)
     st.session_state.setdefault("rrf_k", 60)
     st.session_state.setdefault("ce_threshold", 0.04)
+    # Model selector
+    st.session_state.setdefault("llm_model", config.LLM_MODEL)
+    st.session_state.setdefault("llm_model_custom", "")
     # Generation
     st.session_state.setdefault("temperature", config.LLM_TEMPERATURE)
     st.session_state.setdefault("top_p", 1.0)
@@ -998,6 +1001,60 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
         with st.expander("⚙️ Cài đặt", expanded=False):
 
             # ════════════════════════════════════════════════════════════════
+            # Model selector
+            # ════════════════════════════════════════════════════════════════
+            st.markdown(
+                '<div style="font-size:11px;font-weight:700;color:#6B7280;'
+                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">'
+                '🤖 Model</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Build options: predefined + Tùy chỉnh
+            _CUSTOM_OPT = "✏️  Tùy chỉnh..."
+            _model_options = [f"{mid}  |  {lbl}" for mid, lbl in config.ROUTER9_MODELS]
+            _model_ids     = config.ROUTER9_MODEL_IDS
+
+            # Xác định index hiện tại
+            _cur = st.session_state.llm_model
+            if _cur in _model_ids:
+                _cur_idx = _model_ids.index(_cur)
+            else:
+                _cur_idx = len(_model_options)  # → Tùy chỉnh
+
+            _all_options = _model_options + [_CUSTOM_OPT]
+            _sel = st.selectbox(
+                "Chọn model",
+                options=_all_options,
+                index=min(_cur_idx, len(_all_options) - 1),
+                label_visibility="collapsed",
+                help="Model dùng cho việc sinh câu trả lời. Router dùng model nhỏ hơn riêng.",
+            )
+
+            if _sel == _CUSTOM_OPT:
+                _custom = st.text_input(
+                    "Model ID",
+                    value=st.session_state.llm_model_custom or st.session_state.llm_model,
+                    placeholder="vd: cc/claude-sonnet-4-6 hoặc mistral:latest",
+                    label_visibility="collapsed",
+                )
+                st.session_state.llm_model_custom = _custom
+                if _custom.strip():
+                    st.session_state.llm_model = _custom.strip()
+            else:
+                # Lấy model_id từ option (phần trước " | ")
+                _mid = _sel.split("  |  ")[0].strip()
+                st.session_state.llm_model = _mid
+                st.session_state.llm_model_custom = ""
+
+            # Hiển thị model đang dùng
+            _display = st.session_state.llm_model
+            _provider_icon = "🔵" if _display.startswith("cc/") else "🟢" if _display.startswith("gh/") else "⚪"
+            st.caption(f"{_provider_icon} Đang dùng: `{_display}`")
+
+            st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
+
+            # ════════════════════════════════════════════════════════════════
             # 4 tham số chính — nổi bật ở đầu
             # ════════════════════════════════════════════════════════════════
             st.markdown(
@@ -1563,6 +1620,7 @@ def process_question(
     ce_thresh  = st.session_state.ce_threshold
 
     # Áp dụng tham số generation ngay trước mỗi lượt chat
+    generator.model       = st.session_state.llm_model
     generator.temperature = st.session_state.temperature
     generator.top_p       = st.session_state.top_p
     generator.num_ctx     = st.session_state.num_ctx

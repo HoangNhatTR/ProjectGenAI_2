@@ -49,3 +49,22 @@ HYDE_MODEL = os.getenv("HYDE_MODEL", ROUTER_MODEL)
 
 # URL gốc của API server (dùng để tạo download link trong response)
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+
+# ── Danh sách model cho UI selector ──────────────────────────────────────────
+# Mỗi entry: (model_id, label_hiển_thị)
+ROUTER9_MODELS: list[tuple[str, str]] = [
+    # ── Claude (Anthropic via 9Router) ──
+    ("cc/claude-haiku-4-5-20251001", "Claude Haiku 4.5   — nhanh, tiết kiệm"),
+    ("cc/claude-sonnet-4-6",         "Claude Sonnet 4.6  — cân bằng ★"),
+    ("cc/claude-opus-4-7",           "Claude Opus 4.7    — mạnh, chậm hơn"),
+    ("cc/claude-opus-4-8",           "Claude Opus 4.8    — mới nhất"),
+    # ── GPT (OpenAI via GitHub/9Router) ──
+    ("gh/gpt-4.1",                   "GPT-4.1            — GitHub Models"),
+    ("gh/gpt-4o",                    "GPT-4o             — multimodal"),
+    ("gh/gpt-4o-mini",               "GPT-4o mini        — nhanh, rẻ"),
+    ("gh/o3",                        "OpenAI o3          — reasoning"),
+    ("gh/o4-mini",                   "OpenAI o4-mini     — reasoning nhanh"),
+]
+
+# Model IDs chỉ cho việc tra cứu nhanh
+ROUTER9_MODEL_IDS: list[str] = [m[0] for m in ROUTER9_MODELS]
