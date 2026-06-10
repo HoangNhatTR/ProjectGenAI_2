@@ -25,7 +25,9 @@ from src.embedding import Embedder
 from src.generator import Generator
 from src.guardrails import apply_guardrails
 from src.memory import MemoryStore
+from src.parent_store import ParentStore
 from src.planner import LegalPlanner
+from src.reranker import rerank as _rerank
 from src.retriever import Retriever
 from src.router import SmartRouter
 from src.schemas import Answer
@@ -72,7 +74,12 @@ def init_agent():
         except Exception:
             kg_retriever = None
 
-    retriever = Retriever(embedder, vstore, bm25=bm25, kg_retriever=kg_retriever)
+    _parent_store = ParentStore(config.PARENT_STORE_PATH) if config.PARENT_STORE_PATH.exists() else None
+
+    retriever = Retriever(
+        embedder, vstore, bm25=bm25, kg_retriever=kg_retriever,
+        parent_store=_parent_store,
+    )
 
     top15_urls: list[str] = []
     manifest_path = config.DATA_DIR / "comparison" / "top10_laws" / "manifest.json"
@@ -103,6 +110,12 @@ def init_agent():
     )
 
     ollama_client = generator.get_client()
+
+    # Wire HyDE vào retriever sau khi có LLM client
+    if config.USE_HYDE:
+        retriever.llm_client = ollama_client
+        retriever.hyde_model  = config.HYDE_MODEL
+
     tool_registry = LegalToolRegistry(
         retriever=retriever,
         ollama_client=ollama_client,
@@ -1374,15 +1387,25 @@ def _build_contexts(
         corpus_ctx = retriever.retrieve(
             query, top_k=corpus_k, min_score=min_score,
             use_kg=use_kg, allowed_sources=allowed_sources,
+            use_hyde=config.USE_HYDE, use_parent_expansion=True,
         )
         doc_ctx = doc_store.retrieve(query, top_k=doc_k)
-        return (corpus_ctx + doc_ctx)[:top_k]
+        combined = (corpus_ctx + doc_ctx)[:top_k]
+        if corpus_ctx:
+            _use_ce = corpus_ctx[0].score < 0.04
+            combined = _rerank(query, combined, top_k=top_k, use_cross_encoder=_use_ce)
+        return combined
 
     else:  # corpus_only (hoặc combined khi doc_store rỗng)
-        return retriever.retrieve(
+        ctx = retriever.retrieve(
             query, top_k=top_k, min_score=min_score,
             use_kg=use_kg, allowed_sources=allowed_sources,
+            use_hyde=config.USE_HYDE, use_parent_expansion=True,
         )
+        if ctx:
+            _use_ce = ctx[0].score < 0.04
+            ctx = _rerank(query, ctx, top_k=top_k, use_cross_encoder=_use_ce)
+        return ctx
 
 
 # ─── Pipeline ────────────────────────────────────────────────────────────────

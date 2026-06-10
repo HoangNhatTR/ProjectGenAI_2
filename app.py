@@ -45,6 +45,7 @@ from src.cache import RetrievalCache
 from src.embedding import Embedder
 from src.generator import Generator
 from src.guardrails import apply_guardrails, check_answer_quality
+from src.parent_store import ParentStore
 from src.reranker import rerank, preload as preload_reranker
 from src.memory import MemoryStore
 from src.planner import LegalPlanner
@@ -270,7 +271,12 @@ def main() -> None:
     except Exception:
         kg_retriever = None
 
-    retriever = Retriever(embedder, vstore, bm25=bm25, kg_retriever=kg_retriever)
+    _parent_store = ParentStore(config.PARENT_STORE_PATH) if config.PARENT_STORE_PATH.exists() else None
+
+    retriever = Retriever(
+        embedder, vstore, bm25=bm25, kg_retriever=kg_retriever,
+        parent_store=_parent_store,
+    )
     _api_key = {
         "gemini":     config.GEMINI_API_KEY,
         "groq":       config.GROQ_API_KEY,
@@ -312,6 +318,14 @@ def main() -> None:
 
     # Tools + Planner (dùng chung client với Generator)
     ollama_client = generator.get_client()
+
+    # Wire HyDE vào retriever sau khi có LLM client
+    if config.USE_HYDE:
+        retriever.llm_client = ollama_client
+        retriever.hyde_model  = config.HYDE_MODEL
+        print(f"  HyDE        : BẬT (model={config.HYDE_MODEL})")
+    else:
+        print("  HyDE        : TẮT")
     tool_registry = LegalToolRegistry(
         retriever=retriever,
         ollama_client=ollama_client,
@@ -899,7 +913,10 @@ def _retrieve_cached(
             print(f"  ({label} — cache hit, {len(cached)} nguồn)", flush=True)
         return cached
 
-    contexts = retriever.retrieve(query, top_k=top_k, min_score=min_score)
+    contexts = retriever.retrieve(
+        query, top_k=top_k, min_score=min_score,
+        use_hyde=config.USE_HYDE, use_parent_expansion=True,
+    )
     if not contexts:
         cache.put(query, top_k, min_score, contexts)
         return contexts

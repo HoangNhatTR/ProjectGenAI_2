@@ -20,7 +20,8 @@ def _chunk_to_chroma_meta(chunk: Chunk) -> dict:
         meta["point"] = chunk.point
     if chunk.parent_id:
         meta["parent_id"] = chunk.parent_id
-    for field in ("doc_type", "doc_number", "title", "issued_date", "effective_date", "status"):
+    for field in ("doc_type", "doc_number", "title", "issued_date", "effective_date",
+                  "status", "linh_vuc", "co_quan", "folder"):
         value = getattr(chunk.metadata, field)
         if value:
             meta[field] = value
@@ -36,6 +37,9 @@ def _chroma_to_chunk(chunk_id: str, text: str, meta: dict) -> Chunk:
         issued_date=meta.get("issued_date"),
         effective_date=meta.get("effective_date"),
         status=meta.get("status"),
+        linh_vuc=meta.get("linh_vuc"),
+        co_quan=meta.get("co_quan"),
+        folder=meta.get("folder"),
     )
     return Chunk(
         chunk_id=chunk_id,

@@ -50,7 +50,9 @@ from src.bm25_index import BM25Index
 from src.embedding import Embedder
 from src.generator import Generator
 from src.guardrails import apply_guardrails
+from src.parent_store import ParentStore
 from src.planner import LegalPlanner
+from src.reranker import rerank as _rerank
 from src.retriever import Retriever
 from src.router import SmartRouter
 from src.schemas import Answer
@@ -122,7 +124,14 @@ def _load_agent() -> None:
         except Exception as e:
             print(f"[API] KG không khả dụng: {e}")
 
-    retriever = Retriever(embedder, vstore, bm25=bm25, kg_retriever=kg_retriever)
+    _parent_store = ParentStore(config.PARENT_STORE_PATH) if config.PARENT_STORE_PATH.exists() else None
+    if _parent_store:
+        print(f"[API] ParentStore  : {_parent_store.count():,} entries")
+
+    retriever = Retriever(
+        embedder, vstore, bm25=bm25, kg_retriever=kg_retriever,
+        parent_store=_parent_store,
+    )
 
     top15_urls: list[str] = []
     manifest_path = config.DATA_DIR / "comparison" / "top10_laws" / "manifest.json"
@@ -159,6 +168,15 @@ def _load_agent() -> None:
     print(f"[API] Generator    : {config.LLM_MODEL}")
 
     ollama_client = generator.get_client()
+
+    # Wire HyDE vào retriever sau khi có LLM client
+    if config.USE_HYDE:
+        retriever.llm_client = ollama_client
+        retriever.hyde_model  = config.HYDE_MODEL
+        print(f"[API] HyDE         : BẬT (model={config.HYDE_MODEL})")
+    else:
+        print("[API] HyDE         : TẮT (set USE_HYDE=true để bật)")
+
     tool_registry = LegalToolRegistry(
         retriever=retriever, ollama_client=ollama_client, model=config.LLM_MODEL,
     )
@@ -486,9 +504,17 @@ def _run_pipeline(
     _t0 = time.time()
     contexts = retriever.retrieve(
         search_query, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
+        use_hyde=config.USE_HYDE, use_parent_expansion=True,
     )
     _t_retrieve = time.time() - _t0
     print(f"  [TIMER] Retrieve : {_t_retrieve:.2f}s  ({len(contexts)} chunks)")
+
+    # Rerank — smart skip CrossEncoder nếu RRF score đã cao
+    if contexts:
+        _top_rrf = contexts[0].score
+        _use_ce  = _top_rrf < 0.04
+        contexts = _rerank(search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce)
+        print(f"  [TIMER] Rerank   : CE={'on' if _use_ce else 'skip'} ({len(contexts)} chunks)")
 
     if not contexts and not tool_results:
         print(f"  [TIMER] TOTAL    : {time.time()-_t_total:.2f}s  (no context)")
