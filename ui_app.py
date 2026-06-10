@@ -1518,6 +1518,129 @@ def render_answer_extras(answer: Answer, trace: dict) -> None:
                 st.success(f"💡 Memory mới: {trace['new_memory']}")
 
 
+# ─── Quick Settings Modal ─────────────────────────────────────────────────────
+
+@st.dialog("⚙️ Cài đặt Model & Tham số", width="large")
+def render_quick_settings_modal() -> None:
+    """Modal popup chỉnh nhanh provider, model và 4 tham số chính."""
+
+    _PROVIDERS = {
+        "router9": "🔷 NineRouter",
+        "kieai":   "🟠 Kie AI",
+    }
+    _prov_keys   = list(_PROVIDERS.keys())
+    _prov_labels = list(_PROVIDERS.values())
+
+    # ── Provider ──────────────────────────────────────────────────────────────
+    st.markdown(
+        '<p style="font-size:13px;font-weight:700;color:#374151;margin:0 0 6px 0;">🤖 Provider</p>',
+        unsafe_allow_html=True,
+    )
+    _cur_prov = st.session_state.get("llm_provider", config.LLM_PROVIDER)
+    _prov_idx = _prov_keys.index(_cur_prov) if _cur_prov in _prov_keys else 0
+    _sel_prov_label = st.radio(
+        "provider",
+        options=_prov_labels,
+        index=_prov_idx,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    _new_prov = _prov_keys[_prov_labels.index(_sel_prov_label)]
+    if _new_prov != _cur_prov:
+        st.session_state.llm_provider = _new_prov
+        st.session_state.llm_model = (
+            config.KIEAI_MODEL_IDS[0]  if _new_prov == "kieai"
+            else config.ROUTER9_MODEL_IDS[1]
+        )
+        st.session_state.llm_model_custom = ""
+        st.rerun()
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    st.markdown(
+        '<p style="font-size:13px;font-weight:700;color:#374151;margin:8px 0 4px 0;">Model</p>',
+        unsafe_allow_html=True,
+    )
+    _CUSTOM = "✏️  Tùy chỉnh..."
+    _is_kie  = _new_prov == "kieai"
+    _mlist   = config.KIEAI_MODELS   if _is_kie else config.ROUTER9_MODELS
+    _mids    = config.KIEAI_MODEL_IDS if _is_kie else config.ROUTER9_MODEL_IDS
+    _ph      = "vd: deepseek-chat" if _is_kie else "vd: cc/claude-sonnet-4-6"
+    _mopts   = [f"{mid}  |  {lbl}" for mid, lbl in _mlist] + [_CUSTOM]
+    _cur_m   = st.session_state.get("llm_model", config.LLM_MODEL)
+    _m_idx   = _mids.index(_cur_m) if _cur_m in _mids else len(_mopts) - 1
+    _sel_m   = st.selectbox(
+        "model",
+        options=_mopts,
+        index=min(_m_idx, len(_mopts) - 1),
+        label_visibility="collapsed",
+    )
+    if _sel_m == _CUSTOM:
+        _cval = st.text_input(
+            "model_custom",
+            value=st.session_state.get("llm_model_custom", ""),
+            placeholder=_ph,
+            label_visibility="collapsed",
+        )
+        if _cval.strip():
+            st.session_state.llm_model        = _cval.strip()
+            st.session_state.llm_model_custom = _cval.strip()
+    else:
+        _mid = _sel_m.split("  |  ")[0].strip()
+        st.session_state.llm_model        = _mid
+        st.session_state.llm_model_custom = ""
+
+    _m = st.session_state.get("llm_model", "")
+    _p = st.session_state.get("llm_provider", "")
+    _ok = " ✓ confirmed" if _m == "deepseek-chat" and _p == "kieai" else ""
+    _icon = "🔷" if _p == "router9" else "🟠"
+    st.caption(f"{_icon} `{_m}`{_ok}")
+
+    st.divider()
+
+    # ── 4 tham số chính ───────────────────────────────────────────────────────
+    st.markdown(
+        '<p style="font-size:13px;font-weight:700;color:#374151;margin:0 0 10px 0;">🎛️ Tham số</p>',
+        unsafe_allow_html=True,
+    )
+
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        st.session_state.top_k = st.slider(
+            "🎯 Top-K  —  Số văn bản retrieve",
+            min_value=1, max_value=20,
+            value=st.session_state.get("top_k", config.TOP_K),
+            help="Số chunk văn bản pháp luật đưa vào context LLM. 5 = cân bằng, 10-15 = đầy đủ hơn.",
+        )
+        st.session_state.top_p = st.slider(
+            "🎲 Top-P  —  Nucleus Sampling",
+            min_value=0.0, max_value=1.0, step=0.05,
+            value=float(st.session_state.get("top_p", 1.0)),
+            format="%.2f",
+            help="1.0 = tắt nucleus sampling. 0.9 = lọc chỉ lấy top 90% probability mass.",
+        )
+
+    with col_r:
+        st.session_state.temperature = st.slider(
+            "🌡️ Temperature  —  Độ sáng tạo",
+            min_value=0.0, max_value=1.0, step=0.05,
+            value=float(st.session_state.get("temperature", config.LLM_TEMPERATURE)),
+            format="%.2f",
+            help="0.0 = xác định/nhất quán, 1.0 = sáng tạo/đa dạng. Khuyến nghị 0.1–0.3 cho pháp luật.",
+        )
+        st.session_state.ce_threshold = st.slider(
+            "⚡ Threshold  —  Ngưỡng Reranker",
+            min_value=0.0, max_value=0.20, step=0.01,
+            value=float(st.session_state.get("ce_threshold", 0.04)),
+            format="%.2f",
+            help="RRF score ≤ threshold → dùng CrossEncoder chính xác (chậm ~10s). Cao hơn = bỏ qua CE nhiều hơn.",
+        )
+
+    st.markdown("---")
+    if st.button("✅  Áp dụng & Đóng", use_container_width=True, type="primary"):
+        st.rerun()
+
+
 # ─── Main chat area ───────────────────────────────────────────────────────────
 
 def render_chat(agent: dict, session_store: SessionStore, memory_store: MemoryStore) -> None:
@@ -1531,7 +1654,7 @@ def render_chat(agent: dict, session_store: SessionStore, memory_store: MemorySt
     doc_mode_cfg = DOC_SOURCE_MODES[doc_mode_key]
     doc_store = _get_doc_store(active_id, agent["embedder"])
 
-    # ── Compact header ──
+    # ── Compact header với nút Settings ──
     doc_badge = ""
     if doc_mode_key != "corpus_only":
         doc_badge = (
@@ -1539,29 +1662,54 @@ def render_chat(agent: dict, session_store: SessionStore, memory_store: MemorySt
             f'padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600;margin-left:6px;">'
             f'{doc_mode_cfg["icon"]} {doc_mode_cfg["label"]}</span>'
         )
-    st.markdown(
-        f"""
-        <div style="
-            display:flex;justify-content:space-between;align-items:center;
-            padding:10px 14px;background:#FAFBFD;border:1px solid #E5E7EB;
-            border-radius:12px;margin-bottom:12px;
-        ">
-          <div>
-            <span style="font-size:15px;font-weight:600;color:#111827;">{session.name}</span>
-            <span style="font-size:11px;color:#9CA3AF;margin-left:10px;">
-              {len(session.messages)//2} lượt
-            </span>
-            {doc_badge}
-          </div>
-          <span style="
-            background:{mode_cfg['bg']};color:{mode_cfg['color']};
-            border:1px solid {mode_cfg['border']};
-            padding:4px 12px;border-radius:16px;font-size:12px;font-weight:600;
-          ">{mode_cfg['icon']} {mode_cfg['label']}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+    # Model badge hiện tại
+    _cur_m = st.session_state.get("llm_model", config.LLM_MODEL)
+    _cur_p = st.session_state.get("llm_provider", config.LLM_PROVIDER)
+    _m_icon = "🔷" if _cur_p == "router9" else "🟠"
+    _m_short = _cur_m.split("/")[-1][:18]  # rút gọn tên model
+
+    _col_hdr, _col_btn = st.columns([11, 1])
+    with _col_hdr:
+        st.markdown(
+            f"""
+            <div style="
+                display:flex;justify-content:space-between;align-items:center;
+                padding:10px 14px;background:#FAFBFD;border:1px solid #E5E7EB;
+                border-radius:12px;margin-bottom:4px;
+            ">
+              <div>
+                <span style="font-size:15px;font-weight:600;color:#111827;">{session.name}</span>
+                <span style="font-size:11px;color:#9CA3AF;margin-left:10px;">
+                  {len(session.messages)//2} lượt
+                </span>
+                {doc_badge}
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span style="
+                  background:#F3F4F6;color:#6B7280;border:1px solid #E5E7EB;
+                  padding:3px 10px;border-radius:12px;font-size:11px;font-family:monospace;
+                ">{_m_icon} {_m_short}</span>
+                <span style="
+                  background:{mode_cfg['bg']};color:{mode_cfg['color']};
+                  border:1px solid {mode_cfg['border']};
+                  padding:4px 12px;border-radius:16px;font-size:12px;font-weight:600;
+                ">{mode_cfg['icon']} {mode_cfg['label']}</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with _col_btn:
+        st.markdown("<div style='padding-top:2px;'>", unsafe_allow_html=True)
+        if st.button(
+            "⚙️",
+            key="open_quick_settings",
+            help="Cài đặt model & tham số",
+            use_container_width=True,
+        ):
+            render_quick_settings_modal()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Messages hoặc welcome screen ──
     if is_empty:
