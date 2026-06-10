@@ -27,6 +27,8 @@ GROQ_API_KEY         = os.getenv("GROQ_API_KEY")
 ROUTER9_API_KEY      = os.getenv("ROUTER9_API_KEY", "")
 ROUTER9_BASE_URL     = os.getenv("ROUTER9_BASE_URL", "http://localhost:20128/v1")
 ROUTER9_MODEL        = os.getenv("ROUTER9_MODEL", "cc/claude-haiku-4-5-20251001")
+KIEAI_API_KEY        = os.getenv("KIEAI_API_KEY", "")
+KIEAI_BASE_URL       = os.getenv("KIEAI_BASE_URL", "https://kieai.erweima.ai/api/v1")
 OPENROUTER_API_KEY   = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL  = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
@@ -68,3 +70,19 @@ ROUTER9_MODELS: list[tuple[str, str]] = [
 
 # Model IDs chỉ cho việc tra cứu nhanh
 ROUTER9_MODEL_IDS: list[str] = [m[0] for m in ROUTER9_MODELS]
+
+# ── Kie AI models ─────────────────────────────────────────────────────────────
+# Mỗi entry: (model_id, label, provider_key)
+# Confirmed working: deepseek-chat → deepseek-v4-flash
+# Xem thêm tại: https://kie.ai/market
+KIEAI_MODELS: list[tuple[str, str]] = [
+    ("deepseek-chat",    "DeepSeek Chat  (→ v4-flash) ✓"),
+    ("deepseek-r1",      "DeepSeek R1    (reasoning)"),
+    ("gpt-4o",           "GPT-4o"),
+    ("gpt-4o-mini",      "GPT-4o mini    — nhanh"),
+    ("claude-sonnet",    "Claude Sonnet"),
+    ("claude-haiku",     "Claude Haiku   — nhanh"),
+    ("gemini-2.0-flash", "Gemini 2.0 Flash"),
+    ("gemini-2.5-pro",   "Gemini 2.5 Pro"),
+]
+KIEAI_MODEL_IDS: list[str] = [m[0] for m in KIEAI_MODELS]

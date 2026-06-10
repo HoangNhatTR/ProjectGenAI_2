@@ -284,3 +284,71 @@ class Router9Client:
             delta = chunk.choices[0].delta.content if chunk.choices else None
             if delta:
                 yield delta
+
+
+class KieAIClient:
+    """Wrapper cho Kie AI (kieai.erweima.ai) — OpenAI-compatible API.
+
+    Base URL: https://kieai.erweima.ai/api/v1
+    Đã xác nhận hoạt động: deepseek-chat (→ deepseek-v4-flash)
+    Xem thêm model tại: https://kie.ai/market
+    """
+
+    BASE_URL = "https://kieai.erweima.ai/api/v1"
+
+    def __init__(self, api_key: str, base_url: str = BASE_URL):
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise ImportError("Cần cài 'openai' package: pip install openai>=1.30.0") from e
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict],
+        format: str = "",
+        options: Optional[dict] = None,
+    ) -> dict:
+        options     = options or {}
+        temperature = float(options.get("temperature", 0.2))
+        top_p       = float(options.get("top_p", 1.0))
+        kwargs: dict[str, Any] = {
+            "model":       model,
+            "messages":    messages,
+            "temperature": temperature,
+            "top_p":       top_p,
+            "stream":      False,
+        }
+        if format == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if "response_format" in kwargs and "json_object" in str(exc).lower():
+                kwargs.pop("response_format", None)
+                response = self._client.chat.completions.create(**kwargs)
+            else:
+                raise
+        return {"message": {"content": response.choices[0].message.content or ""}}
+
+    def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        options: Optional[dict] = None,
+    ):
+        options     = options or {}
+        temperature = float(options.get("temperature", 0.2))
+        top_p       = float(options.get("top_p", 1.0))
+        kwargs: dict[str, Any] = {
+            "model":       model,
+            "messages":    messages,
+            "temperature": temperature,
+            "top_p":       top_p,
+            "stream":      True,
+        }
+        for chunk in self._client.chat.completions.create(**kwargs):
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                yield delta

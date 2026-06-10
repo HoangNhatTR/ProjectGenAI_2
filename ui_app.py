@@ -290,8 +290,9 @@ def init_session_state(session_store: SessionStore) -> None:
     st.session_state.setdefault("use_parent_expansion", True)
     st.session_state.setdefault("rrf_k", 60)
     st.session_state.setdefault("ce_threshold", 0.04)
-    # Model selector
+    # Model selector + provider
     st.session_state.setdefault("llm_model", config.LLM_MODEL)
+    st.session_state.setdefault("llm_provider", config.LLM_PROVIDER)
     st.session_state.setdefault("llm_model_custom", "")
     # Generation
     st.session_state.setdefault("temperature", config.LLM_TEMPERATURE)
@@ -1001,7 +1002,7 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
         with st.expander("⚙️ Cài đặt", expanded=False):
 
             # ════════════════════════════════════════════════════════════════
-            # Model selector
+            # Provider + Model selector
             # ════════════════════════════════════════════════════════════════
             st.markdown(
                 '<div style="font-size:11px;font-weight:700;color:#6B7280;'
@@ -1010,47 +1011,81 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
                 unsafe_allow_html=True,
             )
 
-            # Build options: predefined + Tùy chỉnh
-            _CUSTOM_OPT = "✏️  Tùy chỉnh..."
-            _model_options = [f"{mid}  |  {lbl}" for mid, lbl in config.ROUTER9_MODELS]
-            _model_ids     = config.ROUTER9_MODEL_IDS
+            # ── Chọn provider ─────────────────────────────────────────────
+            _PROVIDERS = {
+                "router9": "🔷 NineRouter  (cc/ gh/ models)",
+                "kieai":   "🟠 Kie AI      (kieai.erweima.ai)",
+            }
+            _prov_keys   = list(_PROVIDERS.keys())
+            _prov_labels = list(_PROVIDERS.values())
+            _cur_prov    = st.session_state.llm_provider
+            _prov_idx    = _prov_keys.index(_cur_prov) if _cur_prov in _prov_keys else 0
 
-            # Xác định index hiện tại
-            _cur = st.session_state.llm_model
-            if _cur in _model_ids:
-                _cur_idx = _model_ids.index(_cur)
+            _sel_prov = st.radio(
+                "Provider",
+                options=_prov_labels,
+                index=_prov_idx,
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+            _new_prov = _prov_keys[_prov_labels.index(_sel_prov)]
+            if _new_prov != st.session_state.llm_provider:
+                st.session_state.llm_provider = _new_prov
+                # Reset model về default của provider khi đổi
+                if _new_prov == "kieai":
+                    st.session_state.llm_model = config.KIEAI_MODEL_IDS[0]
+                else:
+                    st.session_state.llm_model = config.ROUTER9_MODEL_IDS[1]  # sonnet
+                st.session_state.llm_model_custom = ""
+
+            # ── Chọn model theo provider ───────────────────────────────────
+            _CUSTOM_OPT = "✏️  Tùy chỉnh..."
+            if st.session_state.llm_provider == "kieai":
+                _model_list = config.KIEAI_MODELS
+                _model_ids  = config.KIEAI_MODEL_IDS
+                _placeholder = "vd: deepseek-chat hoặc gpt-4o"
+            else:
+                _model_list = config.ROUTER9_MODELS
+                _model_ids  = config.ROUTER9_MODEL_IDS
+                _placeholder = "vd: cc/claude-sonnet-4-6"
+
+            _model_options = [f"{mid}  |  {lbl}" for mid, lbl in _model_list]
+            _cur_model = st.session_state.llm_model
+            if _cur_model in _model_ids:
+                _cur_idx = _model_ids.index(_cur_model)
             else:
                 _cur_idx = len(_model_options)  # → Tùy chỉnh
 
             _all_options = _model_options + [_CUSTOM_OPT]
             _sel = st.selectbox(
-                "Chọn model",
+                "Model",
                 options=_all_options,
                 index=min(_cur_idx, len(_all_options) - 1),
                 label_visibility="collapsed",
-                help="Model dùng cho việc sinh câu trả lời. Router dùng model nhỏ hơn riêng.",
+                help="Model sinh câu trả lời. Router/Planner dùng model nhỏ hơn riêng.",
             )
 
             if _sel == _CUSTOM_OPT:
                 _custom = st.text_input(
-                    "Model ID",
+                    "Model ID tùy chỉnh",
                     value=st.session_state.llm_model_custom or st.session_state.llm_model,
-                    placeholder="vd: cc/claude-sonnet-4-6 hoặc mistral:latest",
+                    placeholder=_placeholder,
                     label_visibility="collapsed",
                 )
                 st.session_state.llm_model_custom = _custom
                 if _custom.strip():
                     st.session_state.llm_model = _custom.strip()
             else:
-                # Lấy model_id từ option (phần trước " | ")
                 _mid = _sel.split("  |  ")[0].strip()
                 st.session_state.llm_model = _mid
                 st.session_state.llm_model_custom = ""
 
-            # Hiển thị model đang dùng
-            _display = st.session_state.llm_model
-            _provider_icon = "🔵" if _display.startswith("cc/") else "🟢" if _display.startswith("gh/") else "⚪"
-            st.caption(f"{_provider_icon} Đang dùng: `{_display}`")
+            # Badge trạng thái
+            _m = st.session_state.llm_model
+            _p = st.session_state.llm_provider
+            _badge = "🔷" if _p == "router9" else "🟠"
+            _note  = " ✓ confirmed" if _m == "deepseek-chat" and _p == "kieai" else ""
+            st.caption(f"{_badge} `{_m}`{_note}  ·  provider: `{_p}`")
 
             st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
 
@@ -1620,7 +1655,19 @@ def process_question(
     ce_thresh  = st.session_state.ce_threshold
 
     # Áp dụng tham số generation ngay trước mỗi lượt chat
-    generator.model       = st.session_state.llm_model
+    _sel_provider = st.session_state.llm_provider
+    _sel_model    = st.session_state.llm_model
+    # Lấy API key + host theo provider được chọn
+    _provider_cfg = {
+        "router9":    (config.ROUTER9_API_KEY, config.ROUTER9_BASE_URL),
+        "kieai":      (config.KIEAI_API_KEY,   config.KIEAI_BASE_URL),
+        "openrouter": (config.OPENROUTER_API_KEY, config.OPENROUTER_BASE_URL),
+        "gemini":     (config.GEMINI_API_KEY,  config.OLLAMA_HOST),
+        "groq":       (config.GROQ_API_KEY,    config.OLLAMA_HOST),
+    }
+    _api_key, _host = _provider_cfg.get(_sel_provider, ("", config.OLLAMA_HOST))
+    generator.switch_provider(_sel_provider, _api_key, _host)
+    generator.model       = _sel_model
     generator.temperature = st.session_state.temperature
     generator.top_p       = st.session_state.top_p
     generator.num_ctx     = st.session_state.num_ctx

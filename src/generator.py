@@ -207,7 +207,7 @@ class Generator:
                 from .llm_client import Router9Client
                 self._client = Router9Client(
                     api_key=self.api_key or "",
-                    base_url=self.host,   # host field tái dụng làm base_url
+                    base_url=self.host,
                 )
             elif self.provider == "openrouter":
                 from .llm_client import OpenRouterClient
@@ -215,9 +215,23 @@ class Generator:
                     api_key=self.api_key or "",
                     base_url=self.host,
                 )
+            elif self.provider == "kieai":
+                from .llm_client import KieAIClient
+                self._client = KieAIClient(
+                    api_key=self.api_key or "",
+                    base_url=self.host,
+                )
             else:
                 from ollama import Client
                 self._client = Client(host=self.host)
+
+    def switch_provider(self, provider: str, api_key: str, host: str) -> None:
+        """Đổi provider runtime — reset client để reconnect."""
+        if provider != self.provider or api_key != (self.api_key or "") or host != self.host:
+            self.provider  = provider
+            self.api_key   = api_key
+            self.host      = host
+            self._client   = None  # force reconnect
 
     def get_client(self) -> Any:
         """Expose LLM client cho các module khác (Tools, Planner)."""
