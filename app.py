@@ -25,7 +25,10 @@ Cách chạy:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+import threading
+from pathlib import Path
 from typing import Optional
 
 # Ép UTF-8 cho stdin/stdout để in tiếng Việt OK trên Windows console
@@ -38,12 +41,13 @@ for _stream in (sys.stdout, sys.stdin, sys.stderr):
 
 from src import config
 from src.bm25_index import BM25Index
+from src.cache import RetrievalCache
 from src.embedding import Embedder
 from src.generator import Generator
 from src.guardrails import apply_guardrails, check_answer_quality
+from src.reranker import rerank, preload as preload_reranker
 from src.memory import MemoryStore
 from src.planner import LegalPlanner
-from src.reranker import rerank as rerank_chunks
 from src.retriever import Retriever
 from src.router import SmartRouter
 from src.schemas import Answer, Citation
@@ -51,6 +55,7 @@ from src.session import Session, SessionStore
 from src.state import ConversationState
 from src.tools import LegalToolRegistry
 from src.vectorstore import VectorStore
+from src.parsing import clean_text, parse_pdf, parse_docx, parse_txt
 
 
 # ─── Help text ────────────────────────────────────────────────────────────────
@@ -73,8 +78,29 @@ Lệnh:
   /summary               Xem tóm tắt rolling của phiên hiện tại
   /topk N                Đặt số chunk retrieve (mặc định {TOP_K})
   /minscore X            Đặt ngưỡng cosine (mặc định 0.3, /minscore 0 để tắt)
+  /file <đường dẫn>      Tải file PDF/DOCX/TXT để kiểm tra hoặc hỏi về nội dung
+  /clearfile             Xoá file đang đính kèm
+  /websearch [on|off]    Bật/tắt tìm kiếm web (mặc định: bật)
+  /cache [clear]         Xem thống kê cache hoặc xoá cache retrieval
   /help, /?              Hiện trợ giúp
 """.strip()
+
+# Định dạng file hỗ trợ và parser tương ứng
+_FILE_PARSERS: dict[str, object] = {
+    ".pdf":  parse_pdf,
+    ".docx": parse_docx,
+    ".txt":  parse_txt,
+}
+
+# Regex nhận diện đường dẫn file trong câu nhập tự do
+# Hỗ trợ Windows (C:\...) và Unix (/home/...)
+_FILE_PATH_RE = re.compile(
+    r'(?:"([^"]+\.(?:pdf|docx|txt))"'   # đường dẫn trong dấu ngoặc kép
+    r"|'([^']+\.(?:pdf|docx|txt))'"     # đường dẫn trong dấu ngoặc đơn
+    r"|([A-Za-z]:\\[^\s,;]+\.(?:pdf|docx|txt))"  # Windows path không có ngoặc
+    r"|(/(?:[^\s,;]+)/[^\s,;]+\.(?:pdf|docx|txt)))",  # Unix path không có ngoặc
+    re.IGNORECASE,
+)
 
 MAX_HISTORY_MESSAGES = 10
 AUTO_NAME_MAXLEN     = 50
@@ -96,6 +122,7 @@ def show_sources(answer: Optional[Answer]) -> None:
         return
     for i, cit in enumerate(answer.citations, 1):
         tag = _format_tag(cit.article, cit.clause)
+        # Hiển thị URL gốc đầy đủ ở /sources để tra cứu được
         print(f"  [{i}] {cit.source} → {tag}")
         snippet = cit.snippet.replace("\n", " ")
         print(f"      {snippet[:180]}{'...' if len(snippet) > 180 else ''}")
@@ -218,8 +245,11 @@ def main() -> None:
     print("=" * 62)
     print(f"  Embedding   : {config.EMBEDDING_MODEL}")
     print(f"  LLM         : {config.LLM_MODEL}")
+    _router_display = config.ROUTER_MODEL if config.ROUTER_MODEL != config.LLM_MODEL else f"{config.LLM_MODEL} (chung)"
+    print(f"  Router LLM  : {_router_display}")
     print(f"  Planner     : {'TẮT (--no-planner)' if args.no_planner else 'BẬT'}")
     print(f"  Guardrails  : {'TẮT (--no-guardrails)' if args.no_guardrails else 'BẬT'}")
+    print(f"  Web Search  : BẬT  (gõ /websearch off để tắt)")
     print()
 
     # ── Khởi tạo ──────────────────────────────────────────────────────────────
@@ -232,24 +262,50 @@ def main() -> None:
     if bm25_path.exists():
         bm25 = BM25Index(bm25_path)
 
-    retriever = Retriever(embedder, vstore, bm25=bm25)
+    # KG retriever — optional
+    kg_retriever = None
+    try:
+        from src.kg.kg_retriever import KGRetriever
+        kg_retriever = KGRetriever()
+    except Exception:
+        kg_retriever = None
+
+    retriever = Retriever(embedder, vstore, bm25=bm25, kg_retriever=kg_retriever)
     _api_key = {
-        "gemini": config.GEMINI_API_KEY,
-        "groq":   config.GROQ_API_KEY,
+        "gemini":     config.GEMINI_API_KEY,
+        "groq":       config.GROQ_API_KEY,
+        "router9":    config.ROUTER9_API_KEY,
+        "openrouter": config.OPENROUTER_API_KEY,
     }.get(config.LLM_PROVIDER)
+
+    _llm_host = {
+        "router9":    config.ROUTER9_BASE_URL,
+        "openrouter": config.OPENROUTER_BASE_URL,
+    }.get(config.LLM_PROVIDER, config.OLLAMA_HOST)
 
     generator = Generator(
         model=config.LLM_MODEL,
-        host=config.OLLAMA_HOST,
+        host=_llm_host,
         temperature=config.LLM_TEMPERATURE,
         provider=config.LLM_PROVIDER,
         api_key=_api_key,
     )
+    _router_api_key = {
+        "gemini":     config.GEMINI_API_KEY,
+        "groq":       config.GROQ_API_KEY,
+        "router9":    config.ROUTER9_API_KEY,
+        "openrouter": config.OPENROUTER_API_KEY,
+    }.get(config.LLM_PROVIDER)
+    _router_host = {
+        "router9":    config.ROUTER9_BASE_URL,
+        "openrouter": config.OPENROUTER_BASE_URL,
+    }.get(config.LLM_PROVIDER, config.OLLAMA_HOST)
+
     router    = SmartRouter(
-        model=config.LLM_MODEL,
-        host=config.OLLAMA_HOST,
+        model=config.ROUTER_MODEL,
+        host=_router_host,
         provider=config.LLM_PROVIDER,
-        api_key=_api_key,
+        api_key=_router_api_key,
     )
     sessions  = SessionStore(config.DATA_DIR)
     memory    = MemoryStore(config.DATA_DIR / "memory.json")
@@ -266,6 +322,10 @@ def main() -> None:
         model=config.LLM_MODEL,
         tool_registry=tool_registry,
     )
+
+    reranker_ok = preload_reranker()
+    print(f"  Reranker    : {'CrossEncoder BẬT' if reranker_ok else 'rule-based fallback'}")
+    _retrieval_cache = RetrievalCache(maxsize=512, ttl=3600)
 
     n_chunks = vstore.count()
     print(f"  Vectorstore : {n_chunks} chunks")
@@ -301,6 +361,7 @@ def main() -> None:
     last_answer: Optional[Answer] = None
     top_k: int = config.TOP_K
     min_score: Optional[float] = 0.3
+    web_search_enabled: bool = True
 
     while True:
         try:
@@ -443,6 +504,55 @@ def main() -> None:
                     print("  Cú pháp: /minscore X (vd: /minscore 0.3)")
                 continue
 
+            if cmd == "/websearch":
+                arg_lower = arg.strip().lower()
+                if arg_lower in ("on", "bật", "1", "true", ""):
+                    web_search_enabled = True
+                    print("  Web search: BẬT ✓  — Agent sẽ tìm thêm trên thuvienphapluat.vn / vbpl.vn khi cần.")
+                elif arg_lower in ("off", "tắt", "0", "false"):
+                    web_search_enabled = False
+                    print("  Web search: TẮT ✗  — Agent chỉ dùng corpus nội bộ + RAG.")
+                else:
+                    status = "BẬT ✓" if web_search_enabled else "TẮT ✗"
+                    print(f"  Web search hiện tại: {status}")
+                    print("  Cú pháp: /websearch on  hoặc  /websearch off")
+                continue
+
+            if cmd == "/file":
+                if not arg.strip():
+                    print("  Cú pháp: /file <đường dẫn.pdf/.docx/.txt>")
+                    _show_attached(conv_state)
+                    continue
+                fp = Path(arg.strip().strip('"').strip("'"))
+                ok, text, err = _load_file(fp)
+                if not ok:
+                    print(f"  {err}")
+                    continue
+                conv_state.attached_document = {"text": text, "filename": fp.name}
+                preview = text[:200].replace("\n", " ")
+                print(f"  Đã tải: {fp.name}  ({len(text):,} ký tự)")
+                print(f"  Preview: {preview}...")
+                print("  Gợi ý: 'kiểm tra văn bản này' / 'tóm tắt file' / đặt câu hỏi về nội dung.")
+                continue
+
+            if cmd == "/clearfile":
+                if conv_state.attached_document:
+                    name = conv_state.attached_document["filename"]
+                    conv_state.attached_document = None
+                    print(f"  Đã xoá file đính kèm: {name}")
+                else:
+                    print("  (không có file nào đang đính kèm)")
+                continue
+
+            if cmd == "/cache":
+                arg_lower = arg.strip().lower()
+                if arg_lower == "clear":
+                    _retrieval_cache.invalidate()
+                    print("  Cache đã xoá.")
+                else:
+                    print(f"  Cache: {_retrieval_cache.stats_str()}")
+                continue
+
             if cmd in ("/help", "/?"):
                 print(HELP_TEXT.format(TOP_K=config.TOP_K))
                 continue
@@ -454,7 +564,21 @@ def main() -> None:
         # AGENT PIPELINE
         # ══════════════════════════════════════════════════════════════════════
 
-        # 0) Cập nhật Conversation State từ câu hỏi mới
+        # 0a) Auto-detect đường dẫn file trong câu nhập tự do
+        _path_match = _FILE_PATH_RE.search(user_input)
+        if _path_match:
+            _raw_path = next(g for g in _path_match.groups() if g)
+            _fp = Path(_raw_path)
+            _ok, _ftext, _ferr = _load_file(_fp)
+            if _ok:
+                conv_state.attached_document = {"text": _ftext, "filename": _fp.name}
+                print(f"  Phát hiện file: {_fp.name} ({len(_ftext):,} ký tự) — đã đính kèm tự động.")
+                # Xoá path khỏi user_input để router không bị nhiễu
+                user_input = _FILE_PATH_RE.sub("", user_input).strip() or "kiểm tra văn bản vừa tải lên"
+            else:
+                print(f"  (Phát hiện đường dẫn nhưng không tải được: {_ferr})")
+
+        # 0b) Cập nhật Conversation State từ câu hỏi mới
         conv_state.update_from_question(user_input)
 
         raw_messages = session.messages[session.summary_until:]
@@ -462,125 +586,219 @@ def main() -> None:
         memory_text  = memory.format_for_prompt()
         summary_text = session.summary
 
-        # 1) Router — phân loại intent + quyết định flow
-        decision = router.route(
-            user_input,
-            history=llm_history,
-            memory_text=memory_text,
-            summary_text=summary_text,
-            state=conv_state,
-        )
+        # answer/decision khởi tạo None — sẽ được set trong một trong các flow
+        answer:   Optional[Answer] = None
+        decision = None   # dùng trong post-processing
 
-        # ── Flow A: answer_direct (chitchat / meta / clarify) ─────────────────
-        if decision.action == "answer_direct":
-            answer_text = decision.direct_response or ""
-            print(f"  [intent={decision.intent}]")
-            print(f"\nAgent: {answer_text}\n")
-            answer = Answer(question=user_input, answer=answer_text, citations=[])
-
-        # ── Flow B: use_tool trực tiếp (router biết rõ cần tool gì) ──────────
-        elif decision.action == "use_tool" and decision.tool_name:
-            tool_name  = decision.tool_name
-            tool_query = decision.tool_query or user_input
-            print(f"  [intent={decision.intent} | tool={tool_name}]")
-            print(f"  Đang thực thi tool: {tool_name}...", flush=True)
-
-            if tool_name == "calculate_fine":
-                tool_result = tool_registry.calculate_fine(description=tool_query)
-            elif tool_name == "draft_document":
-                # Format: "<doc_type>|<details>" hoặc toàn bộ là details
-                if "|" in tool_query:
-                    dt, det = tool_query.split("|", 1)
-                else:
-                    dt, det = "văn bản pháp lý", tool_query
-                tool_result = tool_registry.draft_document(doc_type=dt.strip(), details=det.strip())
+        # ── Flow D: Tiếp tục soạn thảo bị ngắt do thiếu thông tin ────────────
+        if conv_state.pending_draft is not None:
+            _pd = conv_state.pending_draft
+            _combined = _pd["details"] + "\nThông tin bổ sung: " + user_input
+            print(f"  [pending_draft | doc={_pd['doc_type']}]")
+            print("  Đang ghép thông tin và soạn lại...", flush=True)
+            _tr = tool_registry.draft_document(
+                doc_type=_pd["doc_type"], details=_combined
+            )
+            if _tr.result.startswith("THIẾU_THÔNG_TIN:"):
+                # Vẫn thiếu — cập nhật details tích luỹ, hỏi tiếp
+                conv_state.pending_draft = {
+                    "doc_type": _pd["doc_type"],
+                    "details": _combined,
+                }
+                _q = _tr.result[len("THIẾU_THÔNG_TIN:\n"):]
+                answer = Answer(question=user_input, answer=_q, citations=[])
+                print(f"\nAgent: {_q}\n")
             else:
-                tool_result = tool_registry.execute(tool_name, query=tool_query)
+                # Đủ thông tin → soạn xong
+                conv_state.pending_draft = None
+                _ctxs = _retrieve_cached(_retrieval_cache, retriever, user_input, top_k, min_score)
+                answer = _stream_and_collect(
+                    generator,
+                    question=user_input, contexts=_ctxs,
+                    history=llm_history, memory_text=memory_text,
+                    summary_text=summary_text,
+                    tool_results=[_tr],
+                    state_context=conv_state.to_context_string(),
+                )
+                print()
+                if answer.citations:
+                    _print_citations_preview(answer)
+                if _tr.docx_path:
+                    print(f"  📎 File DOCX: {_tr.docx_path}")
 
-            # Retrieve thêm context cho generator nếu tool không trả đủ
-            search_q = decision.search_query or user_input
-            contexts = retriever.retrieve(search_q, top_k=top_k, min_score=min_score)
-            contexts = rerank_chunks(search_q, contexts)
+        # ── Flows A / B / C — chỉ chạy nếu Flow D chưa xử lý ─────────────────
+        if answer is None:
 
-            answer = generator.generate(
+            # 1) Router — phân loại intent + quyết định flow
+            decision = router.route(
                 user_input,
-                contexts,
                 history=llm_history,
                 memory_text=memory_text,
                 summary_text=summary_text,
-                tool_results=[tool_result],
-                state_context=conv_state.to_context_string(),
+                state=conv_state,
+                web_search_enabled=web_search_enabled,
             )
-            print(f"\nAgent: {answer.answer}\n")
 
-            if answer.citations:
-                _print_citations_preview(answer)
+            # ── Flow A: answer_direct (chitchat / meta / clarify) ─────────────
+            if decision.action == "answer_direct":
+                answer_text = decision.direct_response or ""
+                print(f"  [intent={decision.intent}]")
+                print(f"\nAgent: {answer_text}\n")
+                answer = Answer(question=user_input, answer=answer_text, citations=[])
 
-        # ── Flow C: retrieve (RAG + optional Planner) ─────────────────────────
-        else:
-            search_query = decision.search_query or user_input
-            intent_label = decision.intent
+            # ── Flow B: use_tool trực tiếp (router biết rõ cần tool gì) ──────
+            elif decision.action == "use_tool" and decision.tool_name:
+                tool_name  = decision.tool_name
+                tool_query = decision.tool_query or user_input
+                print(f"  [intent={decision.intent} | tool={tool_name}]")
+                print(f"  Đang thực thi tool: {tool_name}...", flush=True)
+                _skip_generate = False
 
-            # In query rewrite nếu khác câu gốc
-            if search_query.strip().lower() != user_input.strip().lower():
-                print(f"  [intent={intent_label}] Tìm với: \"{search_query}\"")
+                # Safety-net: nếu web_search bị tắt nhưng router vẫn chọn → fallback RAG
+                if tool_name == "web_search" and not web_search_enabled:
+                    print("  [web_search TẮT → fallback RAG]")
+                    search_q = decision.search_query or tool_query or user_input
+                    contexts = _retrieve_cached(_retrieval_cache, retriever, search_q, top_k, min_score)
+                    answer = _stream_and_collect(
+                        generator,
+                        question=user_input, contexts=contexts,
+                        history=llm_history, memory_text=memory_text,
+                        summary_text=summary_text,
+                        state_context=conv_state.to_context_string(),
+                    )
+                    print()
+                    if answer.citations:
+                        _print_citations_preview(answer)
+                    _skip_generate = True
+                    tool_result = None  # không dùng đến
+
+                elif tool_name == "calculate_fine":
+                    tool_result = tool_registry.calculate_fine(description=tool_query)
+                elif tool_name == "draft_document":
+                    # Format: "<doc_type>|<details>" hoặc toàn bộ là details
+                    if "|" in tool_query:
+                        dt, det = tool_query.split("|", 1)
+                    else:
+                        dt, det = "văn bản pháp lý", tool_query
+                    tool_result = tool_registry.draft_document(doc_type=dt.strip(), details=det.strip())
+                    # Kiểm tra thiếu thông tin — hỏi lại user, lưu pending_draft
+                    if tool_result.result.startswith("THIẾU_THÔNG_TIN:"):
+                        conv_state.pending_draft = {
+                            "doc_type": dt.strip(),
+                            "details": det.strip(),
+                        }
+                        _q = tool_result.result[len("THIẾU_THÔNG_TIN:\n"):]
+                        answer = Answer(question=user_input, answer=_q, citations=[])
+                        print(f"\nAgent: {_q}\n")
+                        _skip_generate = True
+                elif tool_name == "validate_document":
+                    # Ưu tiên dùng file đính kèm; fallback về tool_query (text paste)
+                    if conv_state.attached_document:
+                        _doc = conv_state.attached_document
+                        print(f"  Kiểm tra file: {_doc['filename']} ({len(_doc['text']):,} ký tự)...",
+                              flush=True)
+                        tool_result = tool_registry.validate_document(
+                            document_text=_doc["text"],
+                            filename=_doc["filename"],
+                        )
+                    else:
+                        tool_result = tool_registry.validate_document(
+                            document_text=tool_query,
+                            filename="",
+                        )
+                else:
+                    tool_result = tool_registry.execute(tool_name, query=tool_query)
+
+                if not _skip_generate:
+                    # Retrieve thêm context cho generator nếu tool không trả đủ
+                    search_q = decision.search_query or user_input
+                    contexts = _retrieve_cached(_retrieval_cache, retriever, search_q, top_k, min_score)
+
+                    answer = _stream_and_collect(
+                        generator,
+                        question=user_input, contexts=contexts,
+                        history=llm_history, memory_text=memory_text,
+                        summary_text=summary_text,
+                        tool_results=[tool_result],
+                        state_context=conv_state.to_context_string(),
+                    )
+                    print()
+
+                    # Thông báo file DOCX nếu draft_document đã export
+                    if (tool_result is not None
+                            and tool_result.tool_name == "draft_document"
+                            and tool_result.docx_path):
+                        print(f"  📎 File DOCX: {tool_result.docx_path}")
+
+                    if answer.citations:
+                        _print_citations_preview(answer)
+
+            # ── Flow C: retrieve (RAG + optional Planner) ─────────────────────
             else:
-                print(f"  [intent={intent_label}]")
+                search_query = decision.search_query or user_input
+                intent_label = decision.intent
 
-            tool_results: list = []
-            plan = None
+                # In query rewrite nếu khác câu gốc
+                if search_query.strip().lower() != user_input.strip().lower():
+                    print(f"  [intent={intent_label}] Tìm với: \"{search_query}\"")
+                else:
+                    print(f"  [intent={intent_label}]")
 
-            # 2) Planner — phân tích độ phức tạp
-            if not args.no_planner:
-                plan = planner.create_plan(user_input, state=conv_state)
-                if plan.is_complex():
-                    print(f"  [Planner] complex → {len(plan.tool_steps())} bước tool", flush=True)
-                    tool_results = planner.execute_plan(plan)
-                    for tr in tool_results:
-                        status = "OK" if tr.success else "FAIL"
-                        print(f"    [{status}] {tr.tool_name}")
-                    # Retrieve query từ plan (bước retrieve cuối)
-                    search_query = plan.retrieve_query()
+                tool_results: list = []
+                plan = None
 
-            # 3) Retrieve — lấy RAG context
-            contexts = retriever.retrieve(search_query, top_k=top_k, min_score=min_score)
-            print(f"  ({len(contexts)} nguồn retrieved", end="")
+                # 2) Planner — chỉ gọi khi intent có thể phức tạp.
+                # legal/consulting/followup luôn là simple → skip 1 LLM call.
+                _SIMPLE_INTENTS = {"legal", "consulting", "followup"}
+                if not args.no_planner and intent_label not in _SIMPLE_INTENTS:
+                    plan = planner.create_plan(user_input, state=conv_state)
+                if plan is not None and plan.is_complex():
+                        print(f"  [Planner] complex → {len(plan.tool_steps())} bước tool", flush=True)
+                        tool_results = planner.execute_plan(plan)
+                        for tr in tool_results:
+                            status = "OK" if tr.success else "FAIL"
+                            print(f"    [{status}] {tr.tool_name}")
+                        # Retrieve query từ plan (bước retrieve cuối)
+                        search_query = plan.retrieve_query()
 
-            # 4) Reranker — xếp hạng lại theo tham chiếu điều/khoản
-            contexts = rerank_chunks(search_query, contexts)
-            print(f" → reranked, đang sinh câu trả lời...)", flush=True)
-
-            # 5) Hard citation check — từ chối nếu không có căn cứ pháp lý
-            if not contexts and not tool_results:
-                answer = Answer(
-                    question=user_input,
-                    answer=(
-                        "Không tìm thấy căn cứ pháp lý trong cơ sở dữ liệu cho câu hỏi này.\n"
-                        "Hệ thống chỉ trả lời dựa trên văn bản pháp luật đã được nạp vào. "
-                        "Vui lòng thử hỏi theo cách khác hoặc tham khảo ý kiến luật sư."
-                    ),
-                    citations=[],
+                # 3) Retrieve — lấy RAG context (dùng cache)
+                contexts = _retrieve_cached(
+                    _retrieval_cache, retriever, search_query, top_k, min_score,
+                    label="đang tìm nguồn",
                 )
-            else:
-                # 6) Generator — sinh câu trả lời
-                answer = generator.generate(
-                    user_input,
-                    contexts,
-                    history=llm_history,
-                    memory_text=memory_text,
-                    summary_text=summary_text,
-                    tool_results=tool_results if tool_results else None,
-                    state_context=conv_state.to_context_string(),
-                )
+                print(f"  ({len(contexts)} nguồn retrieved — đang sinh câu trả lời...)", flush=True)
 
-                # 7) Guardrails
-                if not args.no_guardrails:
-                    answer = apply_guardrails(answer, contexts)
+                # 5) Hard citation check — từ chối nếu không có căn cứ pháp lý
+                if not contexts and not tool_results:
+                    answer = Answer(
+                        question=user_input,
+                        answer=(
+                            "Không tìm thấy căn cứ pháp lý trong cơ sở dữ liệu cho câu hỏi này.\n"
+                            "Hệ thống chỉ trả lời dựa trên văn bản pháp luật đã được nạp vào. "
+                            "Vui lòng thử hỏi theo cách khác hoặc tham khảo ý kiến luật sư."
+                        ),
+                        citations=[],
+                    )
+                else:
+                    # 6) Generator — sinh câu trả lời (streaming)
+                    answer = _stream_and_collect(
+                        generator,
+                        question=user_input, contexts=contexts,
+                        history=llm_history, memory_text=memory_text,
+                        summary_text=summary_text,
+                        tool_results=tool_results if tool_results else None,
+                        state_context=conv_state.to_context_string(),
+                    )
 
-            print(f"\nAgent: {answer.answer}\n")
+                    # 7) Guardrails
+                    if not args.no_guardrails:
+                        answer = apply_guardrails(answer, contexts)
 
-            if answer.citations:
-                _print_citations_preview(answer)
+                if answer is not None and not answer.answer.startswith("Không tìm thấy"):
+                    print()
+
+                if answer.citations:
+                    _print_citations_preview(answer)
 
         # ══════════════════════════════════════════════════════════════════════
         # Post-processing
@@ -602,19 +820,108 @@ def main() -> None:
             print(f"  [Summary] Đã cập nhật (cover {session.summary_until}/{len(session.messages)} msgs)")
             sessions.save(session)
 
-        # Auto-extract memory
-        if not args.no_memory_extract and decision.action != "answer_direct":
-            new_facts = generator.extract_memory_facts(user_input, answer.answer)
-            added = []
-            for f in new_facts:
-                fact = memory.add(f, source_session=session.id)
-                if fact is not None:
-                    added.append(fact.content)
-            if added:
-                preview = "; ".join(added)[:120]
-                print(f"  [Memory] Ghi nhớ: {preview}{'...' if len('; '.join(added)) > 120 else ''}")
+        # Auto-extract memory — chạy background thread để không block input tiếp theo
+        if not args.no_memory_extract and (decision is None or decision.action != "answer_direct"):
+            _q = user_input
+            _a = answer.answer
+            _sid = session.id
+
+            def _bg_extract(q: str, a: str, sid: str) -> None:
+                facts = generator.extract_memory_facts(q, a)
+                added = []
+                for f in facts:
+                    fact = memory.add(f, source_session=sid)
+                    if fact is not None:
+                        added.append(fact.content)
+                if added:
+                    preview = "; ".join(added)[:120]
+                    suffix = "..." if len("; ".join(added)) > 120 else ""
+                    print(f"\r  [Memory] Ghi nhớ: {preview}{suffix}\n", flush=True)
+
+            threading.Thread(target=_bg_extract, args=(_q, _a, _sid), daemon=True).start()
 
         last_answer = answer
+
+
+def _load_file(file_path: Path) -> tuple[bool, str, str]:
+    """Đọc và parse file PDF/DOCX/TXT.
+
+    Returns:
+        (ok, text, error_msg)
+    """
+    suffix = file_path.suffix.lower()
+    parser = _FILE_PARSERS.get(suffix)
+    if parser is None:
+        supported = ", ".join(_FILE_PARSERS)
+        return False, "", f"Định dạng '{suffix}' chưa hỗ trợ. Hỗ trợ: {supported}"
+    if not file_path.exists():
+        return False, "", f"Không tìm thấy file: {file_path}"
+    try:
+        raw = parser(file_path)  # type: ignore[operator]
+        text = clean_text(raw)
+        if not text.strip():
+            return False, "", "Không đọc được nội dung file (có thể bị scan/ảnh)."
+        return True, text, ""
+    except Exception as exc:
+        return False, "", f"Lỗi đọc file: {exc}"
+
+
+def _stream_and_collect(generator, **kwargs) -> "Answer":
+    """Gọi stream_generate(), in từng token ra stdout, trả về Answer cuối cùng."""
+    print("\nAgent: ", end="", flush=True)
+    for chunk in generator.stream_generate(**kwargs):
+        print(chunk, end="", flush=True)
+    print()  # newline sau khi stream xong
+    return getattr(generator, "_last_stream_answer", None) or generator.generate(**kwargs)
+
+
+# Ngưỡng RRF score để skip CrossEncoder — chunk xuất hiện đồng thời ở BM25 lẫn vector.
+# 2 * (1/61) ≈ 0.033; dùng 0.04 để chắc chắn hơn.
+_SKIP_RERANK_RRF_THRESHOLD = 0.04
+
+
+def _retrieve_cached(
+    cache: RetrievalCache,
+    retriever,
+    query: str,
+    top_k: int,
+    min_score,
+    label: str = "",
+) -> list:
+    """Retrieve + rerank (với cache + smart skip reranker).
+
+    Nếu top RRF score >= _SKIP_RERANK_RRF_THRESHOLD: chunk đã rank cao ở nhiều
+    branch → bỏ qua CrossEncoder (tiết kiệm 8-14s), chỉ dùng rule-based boost.
+    """
+    cached = cache.get(query, top_k, min_score)
+    if cached is not None:
+        if label:
+            print(f"  ({label} — cache hit, {len(cached)} nguồn)", flush=True)
+        return cached
+
+    contexts = retriever.retrieve(query, top_k=top_k, min_score=min_score)
+    if not contexts:
+        cache.put(query, top_k, min_score, contexts)
+        return contexts
+
+    top_rrf = contexts[0].score
+    # Nếu top chunk đã rank cao ở nhiều branch (RRF score cao) → skip CrossEncoder
+    # để tiết kiệm 8-14s; chỉ dùng rule-based boost.
+    use_ce = top_rrf < _SKIP_RERANK_RRF_THRESHOLD
+    contexts = rerank(query, contexts, top_k=top_k, use_cross_encoder=use_ce)
+
+    cache.put(query, top_k, min_score, contexts)
+    return contexts
+
+
+def _show_attached(conv_state: "ConversationState") -> None:
+    doc = conv_state.attached_document
+    if doc is None:
+        print("  (không có file đính kèm)")
+        return
+    print(f"  File: {doc['filename']}  ({len(doc['text'])} ký tự)")
+    preview = doc["text"][:300].replace("\n", " ")
+    print(f"  Preview: {preview}...")
 
 
 def _print_citations_preview(answer: Answer) -> None:
@@ -622,7 +929,9 @@ def _print_citations_preview(answer: Answer) -> None:
     preview_tags = []
     for i, cit in enumerate(answer.citations[:3], 1):
         tag = _format_tag(cit.article, cit.clause)
-        preview_tags.append(f"[{i}] {cit.source.replace('.txt','').replace('.pdf','')} {tag}")
+        # Hiển thị tên luật thân thiện hơn là URL ID
+        src_display = cit.source.replace(".txt", "").replace(".pdf", "").split("/")[-1].split("\\")[-1]
+        preview_tags.append(f"[{i}] {src_display} {tag}".strip())
     extra = f" • +{len(answer.citations) - 3} nữa" if len(answer.citations) > 3 else ""
     print(f"Nguồn: {' | '.join(preview_tags)}{extra}  (gõ /s để xem đầy đủ)\n")
 

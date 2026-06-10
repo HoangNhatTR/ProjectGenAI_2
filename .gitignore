@@ -20,6 +20,14 @@ data/processed/*
 data/vectorstore/*
 !data/vectorstore/.gitkeep
 
+# Generated / cache — rebuild trên server
+data/bm25/
+data/hf_cache/
+data/sessions/
+data/memory.json
+data/data_report.json
+data/comparison/
+
 # Models cache
 .cache/
 models/

@@ -8,12 +8,15 @@ class DocumentMetadata(BaseModel):
     """Metadata gắn với mỗi văn bản pháp luật gốc."""
 
     source: str
-    doc_type: Optional[str] = None  # luật / nghị định / thông tư / bản án ...
-    doc_number: Optional[str] = None  # ví dụ "45/2019/QH14"
+    doc_type: Optional[str] = None      # Luật / Nghị định / Thông tư / Án lệ ...
+    doc_number: Optional[str] = None    # ví dụ "45/2019/QH14"
     title: Optional[str] = None
-    issued_date: Optional[str] = None  # ISO yyyy-mm-dd
+    issued_date: Optional[str] = None   # ISO yyyy-mm-dd
     effective_date: Optional[str] = None
-    status: Optional[str] = None  # còn hiệu lực / hết hiệu lực ...
+    status: Optional[str] = None        # Còn hiệu lực / Hết hiệu lực ...
+    linh_vuc: Optional[str] = None      # lĩnh vực pháp lý: hinh_su, dat_dai, ...
+    co_quan: Optional[str] = None       # cơ quan ban hành
+    folder: Optional[str] = None        # all_laws / nghi_dinh / an_le / nghi_quyet
 
 
 class RawDocument(BaseModel):
@@ -32,6 +35,7 @@ class Chunk(BaseModel):
     clause: Optional[str] = None   # "Khoản Y"
     point: Optional[str] = None    # "Điểm Z"
     metadata: DocumentMetadata
+    parent_id: Optional[str] = None  # ID trong ParentStore → context đầy đủ cấp Điều
 
 
 class RetrievedChunk(BaseModel):

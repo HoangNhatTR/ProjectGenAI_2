@@ -1,0 +1,18 @@
+# Theme cho Legal AI Agent — phong cách tối sidebar như Claude / ChatGPT
+[theme]
+primaryColor = "#2563EB"            # Xanh dương hiện đại
+backgroundColor = "#FFFFFF"         # Main area trắng
+secondaryBackgroundColor = "#F7F8FA" # Màu nền phụ
+textColor = "#111827"               # Chữ chính
+font = "sans serif"
+
+[server]
+fileWatcherType = "none"
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

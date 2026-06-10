@@ -1,4 +1,61 @@
-# Big Update — Legal AI Agent
+# Changelog
+
+---
+
+## Data Supplement — 2026-06-10
+
+### Dữ liệu mới
+
+| Folder | Số file | Nội dung |
+|---|---|---|
+| `all_laws/` | 615 (+6) | 7 luật còn thiếu + luật mới 2025 |
+| `nghi_dinh/` | ~200+ | Nghị định & Thông tư 9 lĩnh vực |
+| `nghi_quyet/` | 3 | Nghị quyết HĐTP |
+| `an_le/` | đang crawl | Án lệ TAND Tối cao |
+
+### Cải tiến pipeline
+
+- `src/vbpl_client.py` — Client mới 2 bước (search → GET /doc/{id}) thay cho docAbs cũ
+- `scripts/crawl_nghi_dinh.py` — Crawler NĐ/TT 9 lĩnh vực
+- `scripts/crawl_an_le.py` — Crawler Án lệ (toaan.gov.vn + vbpl.vn)
+- `scripts/run_supplement.py` — Pipeline P1+P2 tổng hợp
+- `scripts/post_crawl.py` — Enrich → Ingest → BM25 → Analyze
+- `scripts/check_missing_laws.py` — Kiểm tra 74 luật quan trọng
+- `scripts/analyze_data.py` — Thống kê Chương/Mục/Điều/Khoản/Điểm
+- `scripts/enrich_metadata.py` — Thêm LINH_VUC, VAN_BAN_THAY_THE...
+- `src/schemas.py` — DocumentMetadata: thêm `linh_vuc`, `co_quan`, `folder`
+- `scripts/ingest.py` — Xử lý file root + thư mục mới + metadata mới
+- `data/raw/relationship_map.json` — Bản đồ quan hệ 419 văn bản
+
+### Thống kê dữ liệu (toàn bộ sau supplement)
+
+```
+                  TRƯỚC       SAU
+Văn bản         :   612     → 1,148 files (+87%)
+Dung lượng      :  53 MB   → 134 MB   (+153%)
+Chương          : 4,397    → 8,980
+Mục             : 2,786    → 5,499
+Điều            : 66,146   → 140,734  (+113%)
+Khoản ~         : 153,319  → 298,611  (+95%)
+Điểm  ~         : 85,449   → 186,300  (+118%)
+Tổng QPPL       : ~305,000 → 625,645  (+2x)
+```
+
+**Phân bổ loại văn bản:**
+- Luật/Bộ luật/Hiến pháp : 617 files (all_laws + root)
+- Nghị định & Thông tư   : 440 files (nghi_dinh/)
+- Án lệ                  :  91 files (an_le/)
+- Nghị quyết HĐTP        :   3 files (nghi_quyet/)
+
+**Lĩnh vực phủ rộng nhất:**
+- Dân sự   : 260 VB | 32,375 Điều
+- DN/ĐT    : 172 VB | 17,438 Điều
+- Hình sự  :  77 VB | 12,904 Điều
+- Hành chính: 107 VB | 10,164 Điều
+
+---
+
+## Big Update — Legal AI Agent
 
 **Ngày cập nhật:** 2026-05-13  
 **Phiên bản trước:** RAG Chatbot (hỏi đáp đơn giản)  

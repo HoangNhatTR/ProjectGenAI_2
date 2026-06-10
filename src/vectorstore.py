@@ -18,6 +18,8 @@ def _chunk_to_chroma_meta(chunk: Chunk) -> dict:
         meta["clause"] = chunk.clause
     if chunk.point:
         meta["point"] = chunk.point
+    if chunk.parent_id:
+        meta["parent_id"] = chunk.parent_id
     for field in ("doc_type", "doc_number", "title", "issued_date", "effective_date", "status"):
         value = getattr(chunk.metadata, field)
         if value:
@@ -42,6 +44,7 @@ def _chroma_to_chunk(chunk_id: str, text: str, meta: dict) -> Chunk:
         clause=meta.get("clause"),
         point=meta.get("point"),
         metadata=doc_meta,
+        parent_id=meta.get("parent_id"),
     )
 
 
@@ -82,6 +85,25 @@ class VectorStore:
             documents=[c.text for c in chunks],
             metadatas=[_chunk_to_chroma_meta(c) for c in chunks],
         )
+
+    def get_by_filter(self, where: dict, limit: int = 50) -> list[Chunk]:
+        """Lấy chunks khớp metadata filter (không cần semantic search).
+
+        Dùng cho KG retrieval: cho 1 (source_url, article_label) → lấy hết chunks tương ứng.
+        Chroma `where` syntax: {"$and": [{"field": value}, ...]} hoặc {"field": {"$eq": value}}.
+        """
+        self._connect()
+        try:
+            result = self._collection.get(where=where, limit=limit)
+        except Exception:
+            return []
+        chunks: list[Chunk] = []
+        ids = result.get("ids") or []
+        docs = result.get("documents") or []
+        metas = result.get("metadatas") or []
+        for cid, text, meta in zip(ids, docs, metas):
+            chunks.append(_chroma_to_chunk(cid, text or "", meta or {}))
+        return chunks
 
     def query(
         self,

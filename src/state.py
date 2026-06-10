@@ -95,6 +95,8 @@ class ConversationState:
     law_references: list[str] = field(default_factory=list)  # các tham chiếu đã thấy
     entities: list[str] = field(default_factory=list)        # từ khóa quan trọng
     pending_clarification: Optional[str] = None  # câu hỏi còn lơ lửng
+    pending_draft: Optional[dict] = field(default=None)       # {"doc_type": str, "details": str}
+    attached_document: Optional[dict] = field(default=None)   # {"text": str, "filename": str}
 
     # ── Cập nhật state ────────────────────────────────────────────────────────
 
@@ -105,7 +107,8 @@ class ConversationState:
             self.vehicle_type = vehicle
 
         topic = _detect_topic(question)
-        if topic and not self.current_legal_topic:
+        if topic and topic != self.current_legal_topic:
+            # Cập nhật topic khi phát hiện chủ đề mới (không chỉ set lần đầu)
             self.current_legal_topic = topic
 
         for ref in _extract_law_refs(question):
@@ -119,6 +122,7 @@ class ConversationState:
                 self.law_references.append(ref)
 
         topic = _detect_topic(answer)
+        # Chỉ update topic từ answer nếu chưa có — tránh overwrite topic do user đặt
         if topic and not self.current_legal_topic:
             self.current_legal_topic = topic
 
@@ -181,3 +185,5 @@ class ConversationState:
         self.law_references.clear()
         self.entities.clear()
         self.pending_clarification = None
+        self.pending_draft = None
+        self.attached_document = None

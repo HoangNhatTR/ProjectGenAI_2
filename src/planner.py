@@ -14,10 +14,10 @@ Câu hỏi đơn giản ("mức phạt vượt đèn đỏ là gì?") → Plan 1
 """
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
+
+from .utils import extract_json as _extract_json
 
 if TYPE_CHECKING:
     from .state import ConversationState
@@ -40,7 +40,7 @@ Hãy phân tích và trả về JSON:
     {{
       "step": 1,
       "description": "mô tả bước",
-      "tool": "retrieve" | "legal_search" | "law_article_lookup" | "calculate_fine" | "draft_document",
+      "tool": "retrieve" | "legal_search" | "law_article_lookup" | "calculate_fine" | "draft_document" | "compare_regulations" | "knowledge_graph_lookup" | "validate_document" | "web_search",
       "query": "tham số cho tool (câu query hoặc mô tả tình huống)"
     }}
   ]
@@ -52,7 +52,10 @@ Quy tắc:
     * Câu hỏi tính tổng tiền phạt nhiều lỗi → calculate_fine (1-2 bước)
     * Câu hỏi soạn đơn / công văn → draft_document
     * Câu hỏi tra Điều/Khoản số cụ thể → law_article_lookup
-    * Câu hỏi so sánh 2 trường hợp (xe máy vs ô tô...) → 2 bước legal_search
+    * Câu hỏi so sánh 2 trường hợp (xe máy vs ô tô...) → compare_regulations, query = "A|B"
+    * Câu hỏi về hành vi vi phạm / tội danh cụ thể → knowledge_graph_lookup
+    * Câu hỏi yêu cầu kiểm tra/phân tích văn bản đã cung cấp → validate_document
+    * Câu hỏi cần tìm văn bản mới nhất / kiểm tra hiệu lực → web_search
 - Luôn đặt bước "retrieve" cuối nếu vẫn cần tra văn bản thêm
 - KHÔNG tạo quá 4 bước
 
@@ -61,7 +64,17 @@ CHỈ trả về JSON, KHÔNG giải thích thêm."""
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
 
-VALID_TOOLS = {"retrieve", "legal_search", "law_article_lookup", "calculate_fine", "draft_document"}
+VALID_TOOLS = {
+    "retrieve",
+    "legal_search",
+    "law_article_lookup",
+    "calculate_fine",
+    "draft_document",
+    "web_search",
+    "compare_regulations",
+    "knowledge_graph_lookup",
+    "validate_document",
+}
 
 
 @dataclass
@@ -111,6 +124,7 @@ class LegalPlanner:
         self._client = ollama_client
         self.model = model
         self.tools = tool_registry
+        self._is_thinking = any(x in model.lower() for x in ("qwen3", "qwq", "deepseek-r"))
 
     # ── Create plan ───────────────────────────────────────────────────────────
 
@@ -133,7 +147,7 @@ class LegalPlanner:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 format="json",
-                options={"temperature": 0.0, "num_ctx": 2048},
+                options={"temperature": 0.0, "num_ctx": 2048, **({"think": False} if self._is_thinking else {})},
             )
             raw = response["message"]["content"]
             data = _extract_json(raw)
@@ -193,30 +207,24 @@ class LegalPlanner:
             else:
                 doc_type, details = "văn bản pháp lý", query
             return self.tools.draft_document(doc_type=doc_type.strip(), details=details.strip())
+        elif tool == "web_search":
+            return self.tools.web_search(query=query)
+        elif tool == "compare_regulations":
+            if "|" in query:
+                a, b = query.split("|", 1)
+                return self.tools.compare_regulations(topic_a=a.strip(), topic_b=b.strip())
+            return self.tools.compare_regulations(topic_a=query, topic_b="")
+        elif tool == "knowledge_graph_lookup":
+            return self.tools.knowledge_graph_lookup(query=query)
+        elif tool == "validate_document":
+            return self.tools.validate_document(document_text=query)
         else:
             from .tools import ToolResult
             return ToolResult(tool_name=tool, success=False, result=f"Bước '{tool}' không execute được.")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def _extract_json(text: str) -> Optional[dict]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-    return None
-
+# _extract_json imported from .utils
 
 def _simple_plan(question: str) -> Plan:
     return Plan(

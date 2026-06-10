@@ -7,11 +7,20 @@ Nâng cấp (Big Update):
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import TYPE_CHECKING, Any, Optional
 
 from .schemas import Answer, Citation, RetrievedChunk
+from .utils import extract_json as _extract_json
+
+
+def _extract_cited_indices(answer_text: str, max_n: int) -> list[int]:
+    """Trả về list index (0-based) của các nguồn được nhắc đến trong answer.
+
+    Tìm pattern [1], [2], ... hoặc [1,2] hoặc [1][3] trong answer_text.
+    """
+    nums = set(int(m) for m in re.findall(r'\[(\d+)\]', answer_text))
+    return sorted(i - 1 for i in nums if 1 <= i <= max_n)
 
 if TYPE_CHECKING:
     from .tools import ToolResult
@@ -69,7 +78,15 @@ CHỈ trả về JSON: {{"facts": ["fact 1", "fact 2", ...]}}"""
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _format_source_tag(chunk) -> str:
-    parts = [chunk.metadata.source]
+    # Ưu tiên title (tên luật) > doc_number > URL ID
+    meta = chunk.metadata
+    if meta.title and not meta.title.isdigit():
+        src = meta.title[:60]
+    elif meta.doc_number:
+        src = meta.doc_number
+    else:
+        src = meta.source.replace(".txt", "").replace(".pdf", "").split("/")[-1].split("\\")[-1]
+    parts = [src]
     if chunk.article:
         parts.append(chunk.article)
     if chunk.clause:
@@ -119,7 +136,8 @@ def build_prompt(
     # ── Câu hỏi + hướng dẫn ──────────────────────────────────────────────────
     instructions: list[str] = ["Trả lời dựa trên thông tin trên, lịch sử hội thoại, và memory."]
     if contexts:
-        instructions.append("Trích dẫn dạng [số nguồn] (vd: theo [1]).")
+        instructions.append("Khi trích dẫn quy định, bắt buộc phải ghi rõ tên Điều, Khoản, Điểm và tên văn bản pháp luật cụ thể, kèm theo chỉ số nguồn dạng [n] (ví dụ: theo Điểm a Khoản 2 Điều 8 Nghị định 168/2024/NĐ-CP [1] hoặc Điều 8 Khoản 2 Nghị định 168/2024/NĐ-CP [1]). TUYỆT ĐỐI KHÔNG trích dẫn trống trơn chỉ bằng số thứ tự như 'theo [1]'.")
+        instructions.append("TUYỆT ĐỐI KHÔNG tự tạo danh sách nguồn, phần 'Nguồn:', hoặc 'Nguồn pháp lý:' ở cuối câu trả lời vì hệ thống đã tự động làm việc này.")
     if tool_results:
         instructions.append("Tích hợp kết quả tool vào câu trả lời một cách tự nhiên.")
     instructions.append("Đưa khuyến nghị thực tế ngoài việc nêu quy định.")
@@ -151,25 +169,8 @@ def _build_system_prompt(
     return SYSTEM_PROMPT_TEMPLATE.format(memory_block=extras)
 
 
-def _extract_json(text: str) -> Optional[dict]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
 # ─── Generator ────────────────────────────────────────────────────────────────
+# _extract_json imported from .utils
 
 class Generator:
     """Wrapper LLM (Ollama hoặc Gemini): generate câu trả lời + extract memory facts."""
@@ -188,6 +189,7 @@ class Generator:
         self.temperature = temperature
         self.num_ctx = num_ctx
         self.provider = provider
+        self._is_thinking = any(x in model.lower() for x in ("qwen3", "qwq", "deepseek-r"))
         self.api_key = api_key
         self._client: Optional[Any] = None
 
@@ -199,6 +201,18 @@ class Generator:
             elif self.provider == "groq":
                 from .llm_client import GroqClient
                 self._client = GroqClient(api_key=self.api_key or "")
+            elif self.provider == "router9":
+                from .llm_client import Router9Client
+                self._client = Router9Client(
+                    api_key=self.api_key or "",
+                    base_url=self.host,   # host field tái dụng làm base_url
+                )
+            elif self.provider == "openrouter":
+                from .llm_client import OpenRouterClient
+                self._client = OpenRouterClient(
+                    api_key=self.api_key or "",
+                    base_url=self.host,
+                )
             else:
                 from ollama import Client
                 self._client = Client(host=self.host)
@@ -238,29 +252,105 @@ class Generator:
             messages.extend(history)
         messages.append({"role": "user", "content": user_prompt})
 
+        # Qwen 3.x thinking models: tắt thinking mode (/no_think) để trả lời ngắn, nhanh
+        _is_qwen3 = "qwen3" in self.model.lower() or "qwen3.5" in self.model.lower()
+        _opts: dict = {"temperature": self.temperature, "num_ctx": self.num_ctx}
+        if _is_qwen3:
+            _opts["think"] = False   # Ollama Qwen3 flag — tắt chain-of-thought
+
         response = self._client.chat(
             model=self.model,
             messages=messages,
-            options={
-                "temperature": self.temperature,
-                "num_ctx": self.num_ctx,
-            },
+            options=_opts,
         )
         answer_text = response["message"]["content"].strip()
 
-        # Citations chỉ từ RAG contexts (tool results không tạo Citation)
+        # Citations: chỉ giữ chunks được LLM thực sự trích dẫn bằng [n].
+        # Nếu không tìm thấy số nào, fallback về tất cả contexts (an toàn).
+        cited_indices = _extract_cited_indices(answer_text, len(contexts))
+        cited_contexts = [contexts[i] for i in cited_indices] if cited_indices else contexts
         citations = [
             Citation(
                 source=r.chunk.metadata.source,
                 article=r.chunk.article,
                 clause=r.chunk.clause,
                 point=r.chunk.point,
-                snippet=r.chunk.text[:200],
+                snippet=r.chunk.text,
             )
-            for r in contexts
+            for r in cited_contexts
         ]
 
         return Answer(question=question, answer=answer_text, citations=citations)
+
+    def stream_generate(
+        self,
+        question: str,
+        contexts: list[RetrievedChunk],
+        history:       Optional[list[dict]] = None,
+        memory_text:   str = "",
+        summary_text:  str = "",
+        tool_results:  Optional[list["ToolResult"]] = None,
+        state_context: str = "",
+    ):
+        """Streaming version: yield từng text chunk khi LLM trả về.
+
+        Sau khi stream xong, trả về Answer object qua StopIteration.value.
+        Dùng trong CLI để in từng token thay vì chờ toàn bộ.
+        """
+        self._connect()
+        user_prompt = build_prompt(question, contexts, tool_results=tool_results)
+        system_prompt = _build_system_prompt(memory_text, summary_text, state_context)
+
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_prompt})
+
+        _is_qwen3 = "qwen3" in self.model.lower()
+        _opts: dict = {"temperature": self.temperature, "num_ctx": self.num_ctx}
+        if _is_qwen3:
+            _opts["think"] = False
+
+        # Kiểm tra client có hỗ trợ stream_chat không
+        if not hasattr(self._client, "stream_chat"):
+            # Fallback: non-streaming
+            answer = self.generate(
+                question, contexts,
+                history=history,
+                memory_text=memory_text,
+                summary_text=summary_text,
+                tool_results=tool_results,
+                state_context=state_context,
+            )
+            yield answer.answer
+            return
+
+        full_text = ""
+        for chunk in self._client.stream_chat(
+            model=self.model,
+            messages=messages,
+            options=_opts,
+        ):
+            full_text += chunk
+            yield chunk
+
+        # Lọc citations từ answer đã stream xong
+        cited_indices = _extract_cited_indices(full_text, len(contexts))
+        cited_contexts = [contexts[i] for i in cited_indices] if cited_indices else contexts
+        citations = [
+            Citation(
+                source=r.chunk.metadata.source,
+                article=r.chunk.article,
+                clause=r.chunk.clause,
+                point=r.chunk.point,
+                snippet=r.chunk.text,
+            )
+            for r in cited_contexts
+        ]
+        # Trả Answer qua attribute để caller lấy sau khi yield xong
+        self._last_stream_answer = Answer(
+            question=question, answer=full_text, citations=citations
+        )
 
     def summarize_history(
         self,
@@ -297,7 +387,7 @@ class Generator:
             response = self._client.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.0, "num_ctx": 4096},
+                options={"temperature": 0.0, "num_ctx": 4096, **({"think": False} if self._is_thinking else {})},
             )
             text = response["message"]["content"].strip()
             return text or prev_summary
@@ -313,7 +403,7 @@ class Generator:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 format="json",
-                options={"temperature": 0.0, "num_ctx": 2048},
+                options={"temperature": 0.0, "num_ctx": 2048, **({"think": False} if self._is_thinking else {})},
             )
             raw = response["message"]["content"]
         except Exception:

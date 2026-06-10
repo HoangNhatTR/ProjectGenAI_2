@@ -15,6 +15,8 @@ from src.vectorstore import VectorStore
 
 
 def main() -> None:
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     store = VectorStore(config.VECTORSTORE_DIR, config.COLLECTION_NAME)
     n = store.count()
     print(f"Vectorstore có {n} chunks.")
