@@ -280,10 +280,19 @@ def init_session_state(session_store: SessionStore) -> None:
         st.session_state.last_trace = {}
 
     st.session_state.setdefault("top_k", config.TOP_K)
-    st.session_state.setdefault("min_score", 0.3)
+    st.session_state.setdefault("min_score", 0.0)
     st.session_state.setdefault("use_planner", True)
     st.session_state.setdefault("use_guardrails", True)
     st.session_state.setdefault("use_memory_extract", True)
+    st.session_state.setdefault("web_search_enabled", True)
+    # Retrieval nâng cao
+    st.session_state.setdefault("use_hyde", config.USE_HYDE)
+    st.session_state.setdefault("use_parent_expansion", True)
+    st.session_state.setdefault("rrf_k", 60)
+    st.session_state.setdefault("ce_threshold", 0.04)
+    # Generation
+    st.session_state.setdefault("temperature", config.LLM_TEMPERATURE)
+    st.session_state.setdefault("num_ctx", 8192)
     # RAG mode được lưu per-session qua _get_session_mode / _set_session_mode
 
 
@@ -984,34 +993,106 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
 
         st.markdown("<hr/>", unsafe_allow_html=True)
 
-        # ── Advanced Settings (collapsed) ──
-        with st.expander("⚙️ Cài đặt nâng cao", expanded=False):
+        # ── Settings Panel ──
+        with st.expander("⚙️ Cài đặt", expanded=False):
+
+            # ── Section: Pipeline ────────────────────────────────────────────
             st.markdown(
-                '<div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px;">'
+                '<div style="font-size:11px;font-weight:700;color:#6B7280;'
+                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">'
                 '🧠 Pipeline</div>',
                 unsafe_allow_html=True,
             )
             st.session_state.use_planner = st.toggle(
-                "Planner (multi-step)", value=st.session_state.use_planner,
-                help="Lập kế hoạch nhiều bước cho câu hỏi phức tạp",
+                "Planner đa bước",
+                value=st.session_state.use_planner,
+                help="Lập kế hoạch nhiều bước cho câu hỏi phức tạp (tính tổng phạt, so sánh...)",
             )
             st.session_state.use_guardrails = st.toggle(
-                "Guardrails (disclaimer)", value=st.session_state.use_guardrails,
-                help="Tự động thêm disclaimer pháp lý",
+                "Guardrails",
+                value=st.session_state.use_guardrails,
+                help="Tự động thêm disclaimer pháp lý vào câu trả lời",
             )
             st.session_state.use_memory_extract = st.toggle(
-                "Auto-extract memory", value=st.session_state.use_memory_extract,
-                help="Tự động trích xuất thông tin người dùng vào memory",
+                "Ghi nhớ tự động",
+                value=st.session_state.use_memory_extract,
+                help="Tự động trích xuất thông tin người dùng vào bộ nhớ",
+            )
+            st.session_state.web_search_enabled = st.toggle(
+                "Tìm kiếm web",
+                value=st.session_state.web_search_enabled,
+                help="Cho phép tra cứu văn bản mới nhất trên internet",
             )
 
+            st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
+
+            # ── Section: Retrieval ───────────────────────────────────────────
             st.markdown(
-                '<div style="font-size:12px;font-weight:600;color:#374151;margin:10px 0 6px 0;">'
-                '📊 Tham số retrieval</div>',
+                '<div style="font-size:11px;font-weight:700;color:#6B7280;'
+                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">'
+                '🔍 Retrieval</div>',
                 unsafe_allow_html=True,
             )
-            st.session_state.top_k = st.slider("Top-K chunks", 1, 15, value=st.session_state.top_k)
-            st.session_state.min_score = st.slider(
-                "Min score", 0.0, 1.0, value=float(st.session_state.min_score), step=0.05,
+            st.session_state.top_k = st.slider(
+                "Top-K (số văn bản)",
+                min_value=1, max_value=20,
+                value=st.session_state.top_k,
+                help="Số chunk văn bản pháp luật đưa vào ngữ cảnh. Cao hơn = đầy đủ hơn nhưng chậm hơn.",
+            )
+            st.session_state.use_hyde = st.toggle(
+                "HyDE",
+                value=st.session_state.use_hyde,
+                help="Sinh văn bản pháp luật giả để cải thiện tìm kiếm ngữ nghĩa. Tăng recall ~15-20%.",
+            )
+            st.session_state.use_parent_expansion = st.toggle(
+                "Parent context",
+                value=st.session_state.use_parent_expansion,
+                help="Sau khi tìm, mở rộng về toàn bộ Điều luật để LLM có ngữ cảnh đầy đủ hơn.",
+            )
+
+            # ── Sub-section: Nâng cao (collapsed) ───────────────────────────
+            with st.expander("🔧 Tham số nâng cao", expanded=False):
+                st.session_state.rrf_k = st.slider(
+                    "RRF K",
+                    min_value=10, max_value=120, step=10,
+                    value=st.session_state.rrf_k,
+                    help="Hằng số làm mịn trong Reciprocal Rank Fusion. Cao hơn = ít phân biệt hơn.",
+                )
+                st.session_state.ce_threshold = st.slider(
+                    "CE skip threshold",
+                    min_value=0.00, max_value=0.10, step=0.01,
+                    value=float(st.session_state.ce_threshold),
+                    format="%.2f",
+                    help="Bỏ qua CrossEncoder reranker nếu RRF score vượt ngưỡng này (tiết kiệm 8-14s).",
+                )
+                st.session_state.min_score = st.slider(
+                    "Min score (vector-only)",
+                    0.0, 1.0,
+                    value=float(st.session_state.min_score), step=0.05,
+                    help="Ngưỡng độ liên quan tối thiểu. Chỉ áp dụng khi không có BM25/KG.",
+                )
+
+            st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
+
+            # ── Section: Generation ──────────────────────────────────────────
+            st.markdown(
+                '<div style="font-size:11px;font-weight:700;color:#6B7280;'
+                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">'
+                '🌡️ Generation</div>',
+                unsafe_allow_html=True,
+            )
+            st.session_state.temperature = st.slider(
+                "Temperature",
+                min_value=0.0, max_value=1.0, step=0.05,
+                value=float(st.session_state.temperature),
+                format="%.2f",
+                help="0 = chính xác/nhất quán, 1 = sáng tạo/đa dạng. Khuyến nghị 0.1-0.3 cho pháp luật.",
+            )
+            st.session_state.num_ctx = st.select_slider(
+                "Context window",
+                options=[2048, 4096, 8192, 16384],
+                value=st.session_state.num_ctx,
+                help="Kích thước cửa sổ ngữ cảnh của LLM. Lớn hơn = hiểu được văn bản dài hơn nhưng chậm hơn.",
             )
 
         # ── Memory per-session ──
@@ -1373,6 +1454,9 @@ def _build_contexts(
     doc_store: UploadedDocStore,
     doc_mode: str,
     agent: dict,
+    use_hyde: bool = False,
+    use_parent_expansion: bool = True,
+    ce_threshold: float = 0.04,
 ) -> list:
     """Xây dựng contexts theo doc_mode: corpus / docs / combined."""
     if doc_mode == "docs_only":
@@ -1387,12 +1471,12 @@ def _build_contexts(
         corpus_ctx = retriever.retrieve(
             query, top_k=corpus_k, min_score=min_score,
             use_kg=use_kg, allowed_sources=allowed_sources,
-            use_hyde=config.USE_HYDE, use_parent_expansion=True,
+            use_hyde=use_hyde, use_parent_expansion=use_parent_expansion,
         )
         doc_ctx = doc_store.retrieve(query, top_k=doc_k)
         combined = (corpus_ctx + doc_ctx)[:top_k]
         if corpus_ctx:
-            _use_ce = corpus_ctx[0].score < 0.04
+            _use_ce = corpus_ctx[0].score < ce_threshold
             combined = _rerank(query, combined, top_k=top_k, use_cross_encoder=_use_ce)
         return combined
 
@@ -1400,10 +1484,10 @@ def _build_contexts(
         ctx = retriever.retrieve(
             query, top_k=top_k, min_score=min_score,
             use_kg=use_kg, allowed_sources=allowed_sources,
-            use_hyde=config.USE_HYDE, use_parent_expansion=True,
+            use_hyde=use_hyde, use_parent_expansion=use_parent_expansion,
         )
         if ctx:
-            _use_ce = ctx[0].score < 0.04
+            _use_ce = ctx[0].score < ce_threshold
             ctx = _rerank(query, ctx, top_k=top_k, use_cross_encoder=_use_ce)
         return ctx
 
@@ -1424,8 +1508,18 @@ def process_question(
     planner = agent["planner"]
     tool_registry = agent["tool_registry"]
 
-    top_k = st.session_state.top_k
-    min_score = st.session_state.min_score if st.session_state.min_score > 0 else None
+    top_k      = st.session_state.top_k
+    min_score  = st.session_state.min_score if st.session_state.min_score > 0 else None
+    use_hyde   = st.session_state.use_hyde
+    use_parent = st.session_state.use_parent_expansion
+    ce_thresh  = st.session_state.ce_threshold
+
+    # Áp dụng tham số generation ngay trước mỗi lượt chat
+    generator.temperature = st.session_state.temperature
+    generator.num_ctx     = st.session_state.num_ctx
+
+    # Áp dụng RRF K
+    retriever.rrf_k = st.session_state.rrf_k
 
     mode_key = _get_session_mode(session.id)
     mode_cfg = RETRIEVAL_MODES[mode_key]
@@ -1456,6 +1550,7 @@ def process_question(
             memory_text=memory_text,
             summary_text=summary_text,
             state=conv_state,
+            web_search_enabled=st.session_state.web_search_enabled,
         )
         trace["intent"] = decision.intent
         trace["action"] = decision.action
@@ -1532,6 +1627,8 @@ def process_question(
                 contexts = _build_contexts(
                     search_q, top_k, min_score, use_kg, allowed_sources,
                     retriever, doc_store, doc_mode, agent,
+                    use_hyde=use_hyde, use_parent_expansion=use_parent,
+                    ce_threshold=ce_thresh,
                 )
                 trace["n_contexts"] = len(contexts)
 
@@ -1561,6 +1658,8 @@ def process_question(
             contexts = _build_contexts(
                 search_query, top_k, min_score, use_kg, allowed_sources,
                 retriever, doc_store, doc_mode, agent,
+                use_hyde=use_hyde, use_parent_expansion=use_parent,
+                ce_threshold=ce_thresh,
             )
             trace["n_contexts"] = len(contexts)
             trace["search_query"] = search_query
