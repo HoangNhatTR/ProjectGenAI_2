@@ -239,6 +239,10 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
     web_search: bool = True
+    # Tham số RAG / Reranker từ frontend settings
+    top_k: Optional[int] = None           # số chunk retrieve (mặc định config.TOP_K)
+    ce_threshold: Optional[float] = None  # ngưỡng CrossEncoder skip (mặc định 0.04)
+    llm_model: Optional[str] = None       # override LLM model (router9/kieai)
 
 
 class OAIDelta(BaseModel):
@@ -335,19 +339,36 @@ async def chat_completions(
 
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
+    # Trích tham số từ request (dùng default nếu không có)
+    _top_k       = request.top_k        if request.top_k        is not None else config.TOP_K
+    _temperature = request.temperature  # None → giữ nguyên generator default
+    _top_p       = request.top_p        # None → giữ nguyên
+    _ce_thresh   = request.ce_threshold if request.ce_threshold is not None else 0.04
+    _llm_model   = request.llm_model    # None → không override
+
     if request.stream:
         return StreamingResponse(
-            _stream_pipeline(cid, user_input, history, rag_mode, request.model,
-                             web_search_enabled=request.web_search),
+            _stream_pipeline(
+                cid, user_input, history, rag_mode, request.model,
+                top_k=_top_k,
+                web_search_enabled=request.web_search,
+                temperature=_temperature,
+                top_p=_top_p,
+                ce_threshold=_ce_thresh,
+                llm_model=_llm_model,
+            ),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     else:
+        import functools
         answer = await asyncio.get_event_loop().run_in_executor(
-            None, _run_pipeline, user_input, history, rag_mode, 5, request.web_search,
+            None,
+            functools.partial(
+                _run_pipeline, user_input, history, rag_mode,
+                _top_k, request.web_search,
+                _temperature, _top_p, _ce_thresh, _llm_model,
+            ),
         )
         full_text = _format_answer(answer)
         return ChatCompletionResponse(
@@ -369,6 +390,10 @@ def _run_pipeline(
     rag_mode: str,
     top_k: int = 5,
     web_search_enabled: bool = True,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    ce_threshold: float = 0.04,
+    llm_model: Optional[str] = None,
 ) -> Answer:
     """Chạy toàn bộ Legal AI Agent pipeline (synchronous). Trả về Answer."""
 
@@ -380,6 +405,24 @@ def _run_pipeline(
     planner      = _agent["planner"]
     tool_registry = _agent["tool_registry"]
     top15_urls   = _agent["top15_urls"]
+
+    # ── Áp dụng tham số per-request ───────────────────────────────────────────
+    if temperature is not None:
+        generator.temperature = temperature
+    if top_p is not None:
+        generator.top_p = top_p
+    if llm_model:
+        # Switch provider nếu cần (Router9 vs KieAI) dựa theo prefix
+        _llm_model = llm_model.strip()
+        if _llm_model.startswith(("cc/", "gh/")):
+            generator.switch_provider("router9", config.ROUTER9_API_KEY, config.ROUTER9_BASE_URL)
+        elif _llm_model and not _llm_model.startswith(("cc/", "gh/")):
+            # Assume KieAI nếu không có prefix NineRouter
+            generator.switch_provider("kieai", config.KIEAI_API_KEY, config.KIEAI_BASE_URL)
+        generator.model = _llm_model
+        print(f"  [MODEL] override → {_llm_model}")
+    if retriever.rrf_k:  # chỉ update nếu rrf_k đã set
+        pass  # rrf_k không thay đổi per-request (dùng default)
 
     mode_cfg      = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
     use_kg        = mode_cfg["use_kg"]
@@ -512,9 +555,9 @@ def _run_pipeline(
     # Rerank — smart skip CrossEncoder nếu RRF score đã cao
     if contexts:
         _top_rrf = contexts[0].score
-        _use_ce  = _top_rrf < 0.04
+        _use_ce  = _top_rrf < ce_threshold
         contexts = _rerank(search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce)
-        print(f"  [TIMER] Rerank   : CE={'on' if _use_ce else 'skip'} ({len(contexts)} chunks)")
+        print(f"  [TIMER] Rerank   : CE={'on' if _use_ce else 'skip'} threshold={ce_threshold} ({len(contexts)} chunks)")
 
     if not contexts and not tool_results:
         print(f"  [TIMER] TOTAL    : {time.time()-_t_total:.2f}s  (no context)")
@@ -604,6 +647,10 @@ async def _stream_pipeline(
     model_name: str,
     top_k: int = 5,
     web_search_enabled: bool = True,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    ce_threshold: float = 0.04,
+    llm_model: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """Generator SSE — chạy pipeline trong thread pool rồi stream từng từ."""
 
@@ -624,8 +671,14 @@ async def _stream_pipeline(
     try:
         # Chạy pipeline trong thread pool (blocking → non-blocking)
         loop = asyncio.get_event_loop()
+        import functools
         answer = await loop.run_in_executor(
-            None, _run_pipeline, user_input, history, rag_mode, top_k, web_search_enabled,
+            None,
+            functools.partial(
+                _run_pipeline, user_input, history, rag_mode,
+                top_k, web_search_enabled,
+                temperature, top_p, ce_threshold, llm_model,
+            ),
         )
         _t_pipeline_done = time.time()
         full_text = _format_answer(answer)
