@@ -181,6 +181,7 @@ class Generator:
         host: str = "http://localhost:11434",
         temperature: float = 0.2,
         num_ctx: int = 8192,
+        top_p: float = 1.0,
         provider: str = "ollama",
         api_key: Optional[str] = None,
     ):
@@ -188,6 +189,7 @@ class Generator:
         self.host = host
         self.temperature = temperature
         self.num_ctx = num_ctx
+        self.top_p = top_p
         self.provider = provider
         self._is_thinking = any(x in model.lower() for x in ("qwen3", "qwq", "deepseek-r"))
         self.api_key = api_key
@@ -254,7 +256,7 @@ class Generator:
 
         # Qwen 3.x thinking models: tắt thinking mode (/no_think) để trả lời ngắn, nhanh
         _is_qwen3 = "qwen3" in self.model.lower() or "qwen3.5" in self.model.lower()
-        _opts: dict = {"temperature": self.temperature, "num_ctx": self.num_ctx}
+        _opts: dict = {"temperature": self.temperature, "num_ctx": self.num_ctx, "top_p": self.top_p}
         if _is_qwen3:
             _opts["think"] = False   # Ollama Qwen3 flag — tắt chain-of-thought
 
@@ -307,7 +309,7 @@ class Generator:
         messages.append({"role": "user", "content": user_prompt})
 
         _is_qwen3 = "qwen3" in self.model.lower()
-        _opts: dict = {"temperature": self.temperature, "num_ctx": self.num_ctx}
+        _opts: dict = {"temperature": self.temperature, "num_ctx": self.num_ctx, "top_p": self.top_p}
         if _is_qwen3:
             _opts["think"] = False
 

@@ -292,6 +292,7 @@ def init_session_state(session_store: SessionStore) -> None:
     st.session_state.setdefault("ce_threshold", 0.04)
     # Generation
     st.session_state.setdefault("temperature", config.LLM_TEMPERATURE)
+    st.session_state.setdefault("top_p", 1.0)
     st.session_state.setdefault("num_ctx", 8192)
     # RAG mode được lưu per-session qua _get_session_mode / _set_session_mode
 
@@ -996,6 +997,74 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
         # ── Settings Panel ──
         with st.expander("⚙️ Cài đặt", expanded=False):
 
+            # ════════════════════════════════════════════════════════════════
+            # 4 tham số chính — nổi bật ở đầu
+            # ════════════════════════════════════════════════════════════════
+            st.markdown(
+                '<div style="font-size:11px;font-weight:700;color:#6B7280;'
+                'text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">'
+                '⚡ Tham số chính</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Top-K
+            st.session_state.top_k = st.slider(
+                "Top-K — Số văn bản retrieve",
+                min_value=1, max_value=20,
+                value=st.session_state.top_k,
+                help=(
+                    "Số chunk văn bản pháp luật đưa vào context LLM.\n\n"
+                    "• 3-5: nhanh, phù hợp câu hỏi đơn giản\n"
+                    "• 8-12: đầy đủ hơn cho câu hỏi phức tạp\n"
+                    "• 15-20: tối đa, chậm hơn"
+                ),
+            )
+
+            # Threshold (CE skip)
+            st.session_state.ce_threshold = st.slider(
+                "Threshold — Ngưỡng reranker",
+                min_value=0.00, max_value=0.20, step=0.01,
+                value=float(st.session_state.ce_threshold),
+                format="%.2f",
+                help=(
+                    "Ngưỡng RRF score để bỏ qua CrossEncoder reranker.\n\n"
+                    "• Nếu RRF score > threshold → dùng rule-based nhanh (~0.1s)\n"
+                    "• Nếu RRF score ≤ threshold → dùng CrossEncoder chính xác (~10s)\n"
+                    "• Thấp hơn = CrossEncoder chạy nhiều hơn = chính xác hơn, chậm hơn"
+                ),
+            )
+
+            # Temperature
+            st.session_state.temperature = st.slider(
+                "Temperature — Độ sáng tạo",
+                min_value=0.0, max_value=1.0, step=0.05,
+                value=float(st.session_state.temperature),
+                format="%.2f",
+                help=(
+                    "Kiểm soát độ ngẫu nhiên của LLM khi sinh câu trả lời.\n\n"
+                    "• 0.0: hoàn toàn xác định, lặp lại giống nhau\n"
+                    "• 0.1–0.3: khuyến nghị cho tư vấn pháp luật\n"
+                    "• 0.7–1.0: sáng tạo, đa dạng (dễ hallucinate)"
+                ),
+            )
+
+            # Top-P
+            st.session_state.top_p = st.slider(
+                "Top-P — Nucleus Sampling",
+                min_value=0.0, max_value=1.0, step=0.05,
+                value=float(st.session_state.top_p),
+                format="%.2f",
+                help=(
+                    "Lọc vocabulary theo xác suất tích lũy trước khi sample.\n\n"
+                    "• 1.0: tắt nucleus sampling (dùng toàn bộ vocabulary)\n"
+                    "• 0.9: chỉ lấy top 90% probability mass\n"
+                    "• 0.7–0.9: cân bằng giữa đa dạng và chính xác\n"
+                    "• Dùng kết hợp với Temperature để điều chỉnh output"
+                ),
+            )
+
+            st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
+
             # ── Section: Pipeline ────────────────────────────────────────────
             st.markdown(
                 '<div style="font-size:11px;font-weight:700;color:#6B7280;'
@@ -1026,18 +1095,12 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
 
             st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
 
-            # ── Section: Retrieval ───────────────────────────────────────────
+            # ── Section: Retrieval nâng cao ──────────────────────────────────
             st.markdown(
                 '<div style="font-size:11px;font-weight:700;color:#6B7280;'
                 'text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">'
                 '🔍 Retrieval</div>',
                 unsafe_allow_html=True,
-            )
-            st.session_state.top_k = st.slider(
-                "Top-K (số văn bản)",
-                min_value=1, max_value=20,
-                value=st.session_state.top_k,
-                help="Số chunk văn bản pháp luật đưa vào ngữ cảnh. Cao hơn = đầy đủ hơn nhưng chậm hơn.",
             )
             st.session_state.use_hyde = st.toggle(
                 "HyDE",
@@ -1050,49 +1113,34 @@ def render_sidebar(agent: dict, session_store: SessionStore, memory_store: Memor
                 help="Sau khi tìm, mở rộng về toàn bộ Điều luật để LLM có ngữ cảnh đầy đủ hơn.",
             )
 
-            # ── Sub-section: Nâng cao (collapsed) ───────────────────────────
             with st.expander("🔧 Tham số nâng cao", expanded=False):
                 st.session_state.rrf_k = st.slider(
                     "RRF K",
                     min_value=10, max_value=120, step=10,
                     value=st.session_state.rrf_k,
-                    help="Hằng số làm mịn trong Reciprocal Rank Fusion. Cao hơn = ít phân biệt hơn.",
-                )
-                st.session_state.ce_threshold = st.slider(
-                    "CE skip threshold",
-                    min_value=0.00, max_value=0.10, step=0.01,
-                    value=float(st.session_state.ce_threshold),
-                    format="%.2f",
-                    help="Bỏ qua CrossEncoder reranker nếu RRF score vượt ngưỡng này (tiết kiệm 8-14s).",
+                    help="Hằng số làm mịn Reciprocal Rank Fusion. Cao hơn = ít phân biệt thứ hạng hơn.",
                 )
                 st.session_state.min_score = st.slider(
                     "Min score (vector-only)",
                     0.0, 1.0,
                     value=float(st.session_state.min_score), step=0.05,
-                    help="Ngưỡng độ liên quan tối thiểu. Chỉ áp dụng khi không có BM25/KG.",
+                    help="Ngưỡng cosine similarity tối thiểu. Chỉ tác dụng khi không có BM25/KG.",
                 )
 
             st.markdown("<hr style='margin:8px 0;border-color:#374151'>", unsafe_allow_html=True)
 
-            # ── Section: Generation ──────────────────────────────────────────
+            # ── Section: Generation nâng cao ─────────────────────────────────
             st.markdown(
                 '<div style="font-size:11px;font-weight:700;color:#6B7280;'
                 'text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">'
                 '🌡️ Generation</div>',
                 unsafe_allow_html=True,
             )
-            st.session_state.temperature = st.slider(
-                "Temperature",
-                min_value=0.0, max_value=1.0, step=0.05,
-                value=float(st.session_state.temperature),
-                format="%.2f",
-                help="0 = chính xác/nhất quán, 1 = sáng tạo/đa dạng. Khuyến nghị 0.1-0.3 cho pháp luật.",
-            )
             st.session_state.num_ctx = st.select_slider(
                 "Context window",
                 options=[2048, 4096, 8192, 16384],
                 value=st.session_state.num_ctx,
-                help="Kích thước cửa sổ ngữ cảnh của LLM. Lớn hơn = hiểu được văn bản dài hơn nhưng chậm hơn.",
+                help="Kích thước cửa sổ ngữ cảnh LLM. Lớn hơn = hiểu văn bản dài hơn nhưng chậm hơn.",
             )
 
         # ── Memory per-session ──
@@ -1516,6 +1564,7 @@ def process_question(
 
     # Áp dụng tham số generation ngay trước mỗi lượt chat
     generator.temperature = st.session_state.temperature
+    generator.top_p       = st.session_state.top_p
     generator.num_ctx     = st.session_state.num_ctx
 
     # Áp dụng RRF K
