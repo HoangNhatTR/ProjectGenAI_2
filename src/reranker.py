@@ -12,7 +12,9 @@ Fallback tự động về rule-based nếu model không load được.
 """
 from __future__ import annotations
 
+import datetime
 import math
+import os
 import re
 from typing import Optional
 
@@ -25,6 +27,18 @@ ARTICLE_BOOST = 0.20   # boost khi chunk có đúng Điều/Khoản trong query
 KEYWORD_BOOST = 0.05   # boost nhỏ khi chunk có từ khóa pháp lý
 MAX_BOOST     = 0.35   # tổng rule_boost tối đa mỗi chunk
 SCORE_CAP     = 1.0    # điểm tối đa sau khi kết hợp
+
+# ── Recency / hiệu lực — ưu tiên văn bản hiện hành ────────────────────────────
+# Corpus chứa cả VB từ 1945 và 35% trước 2010, đa số KHÔNG có metadata hiệu lực
+# → khi nội dung tương đương, văn bản mới hơn phải thắng. Tắt: RECENCY_BOOST=false
+RECENCY_ENABLED      = os.getenv("RECENCY_BOOST", "true").lower() == "true"
+RECENCY_DECAY_PER_YR = 0.015  # giảm 1.5%/năm tuổi văn bản
+RECENCY_FLOOR        = 0.75   # sàn — VB cũ vẫn tìm được khi không có VB mới hơn
+EXPIRED_FULL_FACTOR  = 0.50   # 'Hết hiệu lực toàn bộ' → phạt nặng
+EXPIRED_PART_FACTOR  = 0.90   # 'Hết hiệu lực một phần' → phạt nhẹ
+VBHN_FACTOR          = 1.05   # Văn bản hợp nhất (đã gộp sửa đổi) → ưu tiên nhẹ
+
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
 _ARTICLE_PATTERNS = [
     r'(?:Điều|điều)\s+\d+',
@@ -117,6 +131,36 @@ def _rule_boost(query_lower: str, query_refs: set[str], chunk) -> float:
     return min(boost, MAX_BOOST)
 
 
+def _temporal_factor(chunk) -> float:
+    """Hệ số nhân theo hiệu lực + tuổi văn bản + loại VBHN.
+
+    - status 'Hết hiệu lực toàn bộ/một phần' (chỉ có ở nhóm vbpl) → phạt
+    - tuổi (từ issued_date): -1.5%/năm, sàn 0.75 — VB 2024 ăn VB 2007
+      khi CE score tương đương, nhưng VB cũ không bị loại hẳn
+    - văn bản hợp nhất → +5% (text đã gộp mọi sửa đổi, đáng tin nhất)
+    """
+    if not RECENCY_ENABLED:
+        return 1.0
+
+    meta = chunk.metadata
+    factor = 1.0
+
+    status = (meta.status or "").lower()
+    if "hết hiệu lực" in status:
+        factor *= EXPIRED_FULL_FACTOR if "toàn bộ" in status else EXPIRED_PART_FACTOR
+
+    if meta.issued_date:
+        m = _YEAR_RE.search(meta.issued_date)
+        if m:
+            age = max(0, datetime.date.today().year - int(m.group(0)))
+            factor *= max(RECENCY_FLOOR, 1.0 - RECENCY_DECAY_PER_YR * age)
+
+    if (meta.folder or "") == "van_ban_hop_nhat":
+        factor *= VBHN_FACTOR
+
+    return factor
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def rerank(
@@ -155,7 +199,8 @@ def rerank(
             for r, logit in zip(chunks, logits):
                 ce_score   = _sigmoid(logit)
                 rule_b     = _rule_boost(query_lower, query_refs, r.chunk)
-                final      = min(SCORE_CAP, ce_score + rule_b * RULE_ALPHA)
+                temporal   = _temporal_factor(r.chunk)
+                final      = min(SCORE_CAP, (ce_score + rule_b * RULE_ALPHA) * temporal)
                 scored.append((r, final))
 
         except Exception as exc:
@@ -167,7 +212,8 @@ def rerank(
         scored = []
         for r in chunks:
             rule_b   = _rule_boost(query_lower, query_refs, r.chunk)
-            adjusted = min(SCORE_CAP, r.score + rule_b)
+            temporal = _temporal_factor(r.chunk)
+            adjusted = min(SCORE_CAP, (r.score + rule_b) * temporal)
             scored.append((r, adjusted))
 
     scored.sort(key=lambda x: -x[1])

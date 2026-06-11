@@ -57,7 +57,8 @@ IMPORTANT_TYPES: dict[str, str] = {
     "bo luat":            "bo_luat",
     "luat":               "luat",
     "phap lenh":          "phap_lenh",
-    "nghi quyet":         "nghi_quyet",
+    # "nghi quyet" xử lý riêng theo cơ quan (xem NQ_KEEP_AUTHORITIES) —
+    # trước đây nhận vô điều kiện làm lọt ~40k NQ HĐND cấp tỉnh (noise)
     "van ban hop nhat":   "van_ban_hop_nhat",  # văn bản hợp nhất
 
     # Tầng Chính phủ / Bộ
@@ -66,6 +67,16 @@ IMPORTANT_TYPES: dict[str, str] = {
     "thong tu":           "thong_tu",
     "chi thi":            "chi_thi",
 }
+
+# Nghị quyết: CHỈ giữ cấp trung ương — NQ Quốc hội/UBTVQH/Chính phủ/HĐTP
+# có giá trị quy phạm toàn quốc; NQ HĐND tỉnh/huyện là điều hành địa phương
+NQ_KEEP_AUTHORITIES: list[str] = [
+    "quoc hoi",             # Quốc hội + Ủy ban Thường vụ Quốc hội
+    "chinh phu",            # Chính phủ
+    "hoi dong tham phan",   # HĐTP TAND Tối cao (nguồn án lệ)
+    "hoi dong nha nuoc",    # Hội đồng Nhà nước (VB cũ)
+    "trung uong",
+]
 
 # Quyết định: CHỈ giữ từ các cơ quan TW tầng cao nhất
 # (nhiều QĐ cấp tỉnh/huyện → noise, không cần cho RAG pháp lý)
@@ -134,6 +145,12 @@ def get_folder(legal_type: str, authority: str = "") -> str | None:
     if "chi thi" in lt_norm:
         if any(kw in auth_norm for kw in CT_KEEP_AUTHORITIES):
             return "chi_thi"
+        return None
+
+    # Nghị quyết: chỉ cấp trung ương (loại NQ HĐND tỉnh/huyện)
+    if "nghi quyet" in lt_norm:
+        if any(kw in auth_norm for kw in NQ_KEEP_AUTHORITIES):
+            return "nghi_quyet"
         return None
 
     # Các loại VB khác (Luật, NĐ, TT...): check IMPORTANT_TYPES
