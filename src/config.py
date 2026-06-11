@@ -52,6 +52,21 @@ HYDE_MODEL = os.getenv("HYDE_MODEL", ROUTER_MODEL)
 # URL gốc của API server (dùng để tạo download link trong response)
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
+# ── API server security ───────────────────────────────────────────────────────
+# Nếu set, mọi request tới /v1/* phải gửi header: Authorization: Bearer <key>
+# Để trống = không bắt auth (chỉ nên dùng khi chạy localhost)
+API_AUTH_KEY = os.getenv("API_AUTH_KEY", "")
+
+# Danh sách origin được phép gọi API (phân tách bằng dấu phẩy).
+# Đặt CORS_ORIGINS=* để mở hoàn toàn (khi đó credentials bị tắt theo spec CORS).
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:8501"
+    ).split(",")
+    if o.strip()
+]
+
 # ── Danh sách model cho UI selector ──────────────────────────────────────────
 # Mỗi entry: (model_id, label_hiển_thị)
 ROUTER9_MODELS: list[tuple[str, str]] = [

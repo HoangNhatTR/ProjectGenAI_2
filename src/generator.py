@@ -338,6 +338,7 @@ class Generator:
                 tool_results=tool_results,
                 state_context=state_context,
             )
+            self._last_stream_answer = answer
             yield answer.answer
             return
 

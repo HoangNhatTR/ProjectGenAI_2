@@ -83,11 +83,14 @@ def apply_guardrails(
     answer: Answer,
     contexts: list[RetrievedChunk],
     add_disclaimer: bool = True,
+    warn_no_evidence: bool = True,
 ) -> Answer:
     """Áp dụng guardrails lên câu trả lời đã generate.
 
     Logic:
       1. Nếu không có context retrieved → thêm warning thiếu căn cứ
+         (tắt bằng warn_no_evidence=False khi câu trả lời đến từ tool
+         tự chứa căn cứ — validate_document, compare_regulations...)
       2. Nếu câu hỏi là tư vấn cá nhân → disclaimer personal
       3. Nếu câu hỏi phức tạp (khởi kiện, tù...) → warning complex
       4. Luôn thêm disclaimer chung (nếu add_disclaimer=True)
@@ -98,7 +101,7 @@ def apply_guardrails(
     text = answer.answer
 
     # 1. Không có context và câu trả lời không tự nhận thiếu căn cứ
-    if not contexts and not _answer_lacks_evidence(text):
+    if warn_no_evidence and not contexts and not _answer_lacks_evidence(text):
         text += _WARNING_NO_EVIDENCE
 
     # 2. Tư vấn tình huống cá nhân

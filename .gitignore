@@ -24,9 +24,16 @@ data/vectorstore/*
 data/bm25/
 data/hf_cache/
 data/sessions/
+data/memory/
 data/memory.json
 data/data_report.json
+data/data_report_current.json
 data/comparison/
+data/exports/
+data/Bản án/
+
+# Debug artifacts
+test_extract.json
 
 # Models cache
 .cache/
