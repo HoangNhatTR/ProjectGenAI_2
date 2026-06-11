@@ -27,6 +27,11 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+# .env set TRANSFORMERS_OFFLINE=1 cho inference local — phải tắt offline mode
+# TRƯỚC khi import huggingface_hub, nếu không API call sẽ bị chặn
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
+
 RAW_DIR = ROOT / "data" / "raw"
 ARCHIVE = ROOT / "data" / "exports" / "corpus_clean.tar.gz"
 HF_REPO = "HoangNhat1304/legalai-corpus-clean"
@@ -38,14 +43,18 @@ def main() -> None:
         sys.exit("Thiếu HF_TOKEN trong .env")
 
     n_files = sum(1 for _ in RAW_DIR.rglob("*.txt"))
-    print(f"[1/3] Nén {n_files:,} file từ {RAW_DIR} ...")
-    ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
-    t0 = time.time()
-    with tarfile.open(ARCHIVE, "w:gz", compresslevel=6) as tar:
-        # arcname='raw' → giải nén vào data/ sẽ tạo data/raw/
-        tar.add(RAW_DIR, arcname="raw")
-    mb = ARCHIVE.stat().st_size / 1e6
-    print(f"  ✓ {ARCHIVE.name}: {mb:,.0f} MB ({(time.time()-t0)/60:.1f} phút)")
+    if ARCHIVE.exists() and ARCHIVE.stat().st_size > 1e6 and "--force" not in sys.argv:
+        mb = ARCHIVE.stat().st_size / 1e6
+        print(f"[1/3] Archive đã có ({mb:,.0f} MB) — tái dùng (xóa hoặc --force để nén lại)")
+    else:
+        print(f"[1/3] Nén {n_files:,} file từ {RAW_DIR} ...")
+        ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        with tarfile.open(ARCHIVE, "w:gz", compresslevel=6) as tar:
+            # arcname='raw' → giải nén vào data/ sẽ tạo data/raw/
+            tar.add(RAW_DIR, arcname="raw")
+        mb = ARCHIVE.stat().st_size / 1e6
+        print(f"  ✓ {ARCHIVE.name}: {mb:,.0f} MB ({(time.time()-t0)/60:.1f} phút)")
 
     print(f"[2/3] Tạo repo dataset {HF_REPO} (private)...")
     from huggingface_hub import HfApi
