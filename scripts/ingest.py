@@ -5,12 +5,18 @@ Cách chạy:
     python -m scripts.ingest --topic hien_phap   # chỉ 1 chủ đề
     python -m scripts.ingest --reset             # xoá store cũ trước khi nạp
     python -m scripts.ingest --skip-existing     # bỏ qua file đã embed (resume)
+
+Tối ưu GPU: chunks được GOM TOÀN CỤC vào buffer (mặc định 1024, override bằng
+env EMBED_BUFFER_CHUNKS) rồi mới embed một lần — file nhỏ không còn làm GPU
+chạy batch lẻ. Embedder tự bật FP16 + batch size phù hợp khi có CUDA.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -160,9 +166,30 @@ def main() -> None:
             existing_sources.add(c.metadata.source)
         print(f"  → {len(existing_sources)} doc đã có, sẽ bỏ qua.")
 
+    # ── Global batching ───────────────────────────────────────────────────────
+    # Gom chunks từ nhiều file vào buffer rồi embed 1 lần → GPU luôn chạy
+    # batch đầy thay vì batch lẻ theo từng file nhỏ.
+    EMBED_BUFFER = int(os.getenv("EMBED_BUFFER_CHUNKS", "1024"))
+    STORE_SLICE  = 4096  # Chroma giới hạn ~5461 items/lần add
+
+    LOG_EVERY = 200  # in tiến độ mỗi N docs (tránh ngập log với 89k files)
+
     total_docs    = 0
     total_chunks  = 0
     skipped       = 0
+    buffer: list  = []
+    t_start       = time.time()
+
+    def _flush() -> None:
+        """Embed + lưu toàn bộ buffer hiện tại."""
+        nonlocal total_chunks
+        if not buffer:
+            return
+        embeddings = embedder.encode([c.text for c in buffer])
+        for i in range(0, len(buffer), STORE_SLICE):
+            store.add(buffer[i:i + STORE_SLICE], embeddings[i:i + STORE_SLICE])
+        total_chunks += len(buffer)
+        buffer.clear()
 
     for path, meta in iter_raw_files(config.RAW_DIR, topic_filter=args.topic):
         if args.skip_existing and meta.source in existing_sources:
@@ -174,20 +201,34 @@ def main() -> None:
             if not chunks:
                 print(f"  [!] Không chunk được: {path.name}")
                 continue
-            embeddings = embedder.encode_chunks(chunks)
-            store.add(chunks, embeddings)
-            total_chunks += len(chunks)
-            total_docs   += 1
-            print(f"  [{total_docs}] {path.parent.name}/{path.name} → {len(chunks)} chunks")
+            buffer.extend(chunks)
+            total_docs += 1
+
+            if len(buffer) >= EMBED_BUFFER:
+                _flush()
+
+            if total_docs % LOG_EVERY == 0:
+                elapsed = time.time() - t_start
+                done = total_chunks + len(buffer)
+                rate = done / elapsed if elapsed > 0 else 0
+                print(
+                    f"  [{total_docs:,} docs] {done:,} chunks | "
+                    f"{rate:.0f} chunks/s | {elapsed/60:.1f} phút"
+                )
         except Exception as exc:
             print(f"  [!] Lỗi {path.name}: {exc}")
 
-    print(f"\nXong. Mới nạp: {total_docs} tài liệu, {total_chunks} chunks.")
+    _flush()  # phần còn lại trong buffer
+
+    elapsed = time.time() - t_start
+    print(f"\nXong sau {elapsed/3600:.2f} giờ. Mới nạp: {total_docs:,} tài liệu, {total_chunks:,} chunks.")
+    if total_chunks and elapsed > 0:
+        print(f"Throughput trung bình: {total_chunks/elapsed:.0f} chunks/s")
     if skipped:
-        print(f"Đã bỏ qua: {skipped} tài liệu (--skip-existing).")
-    print(f"Store total: {store.count()} chunks")
+        print(f"Đã bỏ qua: {skipped:,} tài liệu (--skip-existing).")
+    print(f"Store total: {store.count():,} chunks")
     if parent_store:
-        print(f"Parent store total: {parent_store.count()} entries")
+        print(f"Parent store total: {parent_store.count():,} entries")
 
 
 if __name__ == "__main__":
