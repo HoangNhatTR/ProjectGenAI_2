@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -7,7 +8,7 @@ from typing import Any, Iterator, Optional
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from . import config
-from .schemas import Chunk, RawDocument
+from .schemas import Chunk, DocumentMetadata, RawDocument
 
 # ── Regex patterns ─────────────────────────────────────────────────────────────
 
@@ -26,8 +27,14 @@ _HAS_ARTICLE_RE = re.compile(r"(?m)^Điều\s+\d+")
 
 _DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", "; ", " ", ""]
 
-# Số ký tự tối đa lưu cho 1 parent chunk (1 Điều)
-MAX_PARENT_CHARS = 2000
+# Số ký tự tối đa cho 1 parent entry.
+# Điều dài hơn ngưỡng này KHÔNG bị cắt cụt nữa (bug cũ với MAX=2000 làm mất
+# ~95% nội dung các điều xử phạt lớn) — thay vào đó parent chuyển xuống cấp
+# Khoản (kèm dòng tiêu đề Điều để giữ ngữ cảnh).
+MAX_PARENT_CHARS = 6000
+
+# Độ dài tối đa của tiêu đề Điều khi đưa vào contextual header
+_ART_TITLE_MAX = 90
 
 
 def _make_splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
@@ -37,6 +44,34 @@ def _make_splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTex
         separators=_DEFAULT_SEPARATORS,
         length_function=len,
     )
+
+
+# ── Contextual header helpers ──────────────────────────────────────────────────
+
+def _doc_label(meta: DocumentMetadata) -> str:
+    """Nhãn ngắn định danh văn bản: ưu tiên số hiệu > tên > stem."""
+    if meta.doc_number:
+        return meta.doc_number
+    if meta.title and not meta.title.isdigit():
+        return meta.title[:60]
+    return Path(meta.source).stem
+
+
+def _article_title(article_text: str, max_len: int = _ART_TITLE_MAX) -> str:
+    """Dòng đầu của Điều: 'Điều 8. Xử phạt người điều khiển xe...' (cắt gọn)."""
+    first = article_text.strip().splitlines()[0].strip()
+    return first[:max_len]
+
+
+def _with_header(text: str, *parts: Optional[str]) -> str:
+    """Prepend contextual header '[A — B — C]' vào text trước khi embed.
+
+    Header giúp embedding/BM25 phân biệt được cùng một câu chữ vi phạm
+    xuất hiện trong nhiều văn bản khác nhau, và giúp chunk Điểm a/b/c
+    mang theo ngữ cảnh Điều/Khoản của nó.
+    """
+    header = " — ".join(p for p in parts if p)
+    return f"[{header}]\n{text}" if header else text
 
 
 # ── Structural iterators ───────────────────────────────────────────────────────
@@ -115,15 +150,27 @@ def _iter_points(clause_text: str) -> Iterator[tuple[Optional[str], str]]:
 
 # ── Chunking strategies ────────────────────────────────────────────────────────
 
+def _chunk_prefix(doc: RawDocument) -> str:
+    """Prefix duy nhất cho chunk_id: stem + hash ngắn của source.
+
+    Hash chống trùng id khi 2 văn bản khác nhau có cùng stem
+    (vd cùng tên file trong 2 thư mục loại VB khác nhau).
+    """
+    stem = Path(doc.metadata.source).stem
+    uid = hashlib.md5(doc.metadata.source.encode("utf-8")).hexdigest()[:8]
+    return f"{stem}_{uid}"
+
+
 def chunk_recursive(doc: RawDocument, chunk_size: int, chunk_overlap: int) -> list[Chunk]:
     """Fallback RecursiveCharacterTextSplitter cho văn bản không có Điều/Khoản."""
     splitter = _make_splitter(chunk_size, chunk_overlap)
+    prefix = _chunk_prefix(doc)
+    label = _doc_label(doc.metadata)
     parts = splitter.split_text(doc.text)
-    src_stem = Path(doc.metadata.source).stem
     return [
         Chunk(
-            chunk_id=f"{src_stem}_{i:04d}",
-            text=part,
+            chunk_id=f"{prefix}_{i:04d}",
+            text=_with_header(part, label),
             metadata=doc.metadata,
         )
         for i, part in enumerate(parts)
@@ -136,15 +183,21 @@ def chunk_by_legal_structure(
     chunk_overlap: int,
     parent_store: Optional[Any] = None,
 ) -> list[Chunk]:
-    """Chunk theo Điều → Khoản → Điểm với optional parent-child.
+    """Chunk theo Điều → Khoản → Điểm với parent-child + contextual header.
 
-    Khi parent_store được cung cấp:
-      - Mỗi Điều → 1 parent entry trong SQLite (text đầy đủ, không embed)
-      - Child chunks có parent_id → Retriever expand về parent text khi generate
-    Khi parent_store là None: hành vi tương tự cũ, chỉ thêm Điểm level.
+    Parent-child (khi parent_store được cung cấp):
+      - Điều ≤ MAX_PARENT_CHARS → 1 parent entry = full text Điều
+      - Điều dài hơn → parent theo TỪNG KHOẢN (kèm dòng tiêu đề Điều) —
+        không còn cắt cụt mất nội dung như trước
+      - Child chunks mang parent_id → Retriever expand khi generate
+
+    Contextual header: mỗi child chunk được prepend
+      '[<số hiệu VB> — <Điều X. tiêu đề> — Khoản Y]'
+    để embedding/BM25 giữ được ngữ cảnh dù text gốc chỉ là 'a) ...'.
     """
     splitter = _make_splitter(chunk_size, chunk_overlap)
-    src_stem = Path(doc.metadata.source).stem
+    prefix = _chunk_prefix(doc)
+    doc_label = _doc_label(doc.metadata)
     chunks: list[Chunk] = []
     parent_batch: list[tuple[str, str]] = []
 
@@ -160,7 +213,7 @@ def chunk_by_legal_structure(
             return
         chunks.append(
             Chunk(
-                chunk_id=f"{src_stem}_{len(chunks):04d}",
+                chunk_id=f"{prefix}_{len(chunks):04d}",
                 text=text,
                 article=article,
                 clause=clause,
@@ -171,34 +224,63 @@ def chunk_by_legal_structure(
         )
 
     for _chapter, article_label, article_text in _iter_articles(doc.text):
+        # ── Preamble / văn bản không thuộc Điều nào ──────────────────────────
         if article_label is None:
             for sub in splitter.split_text(article_text):
-                add(sub)
+                add(_with_header(sub, doc_label))
             continue
 
         article_str = f"Điều {article_label}"
+        art_title = _article_title(article_text)
+        # Dòng tiêu đề đầy đủ của Điều — dùng cho parent text cấp Khoản
+        art_first_line = article_text.strip().splitlines()[0].strip()
 
-        # ── Parent chunk: lưu full text của Điều vào store ───────────────────
-        parent_id: Optional[str] = None
+        # ── Parent cấp Điều (chỉ khi Điều đủ ngắn để không bị cắt) ───────────
+        article_parent_id: Optional[str] = None
+        use_clause_parents = False
         if parent_store is not None:
-            parent_id = f"{src_stem}_p_{article_label}"
-            parent_batch.append((parent_id, article_text[:MAX_PARENT_CHARS]))
+            if len(article_text) <= MAX_PARENT_CHARS:
+                article_parent_id = f"{prefix}_p_{article_label}"
+                parent_batch.append((article_parent_id, article_text))
+            else:
+                use_clause_parents = True  # Điều quá dài → parent theo Khoản
 
         # ── Điều ngắn → 1 child chunk ────────────────────────────────────────
+        # (text đã bắt đầu bằng 'Điều X. ...' nên header chỉ cần số hiệu VB)
         if len(article_text) <= chunk_size:
-            add(article_text, article=article_str, parent_id=parent_id)
+            add(
+                _with_header(article_text, doc_label),
+                article=article_str,
+                parent_id=article_parent_id,
+            )
             continue
 
         # ── Điều dài → Khoản → Điểm ─────────────────────────────────────────
         for clause_label, clause_text in _iter_clauses(article_text):
             clause_str = f"Khoản {clause_label}" if clause_label else None
 
+            # Parent cấp Khoản cho Điều quá dài — kèm tiêu đề Điều giữ ngữ cảnh
+            parent_id = article_parent_id
+            if use_clause_parents:
+                k = clause_label or "head"
+                parent_id = f"{prefix}_p_{article_label}_k_{k}"
+                if clause_label:
+                    parent_text = f"{art_first_line}\n{clause_text}"
+                else:
+                    parent_text = clause_text  # head đã chứa tiêu đề Điều
+                parent_batch.append((parent_id, parent_text[:MAX_PARENT_CHARS]))
+
+            # Head của Điều (trước Khoản 1) đã chứa 'Điều X. ...' → header gọn
+            head_parts = (doc_label,) if clause_label is None else (doc_label, art_title)
+
             for point_label, point_text in _iter_points(clause_text):
                 point_str = f"Điểm {point_label}" if point_label else None
+                # Chunk Điểm cần đủ ngữ cảnh: VB + Điều + Khoản
+                parts = head_parts + ((clause_str,) if point_label else ())
 
                 if len(point_text) <= chunk_size:
                     add(
-                        point_text,
+                        _with_header(point_text, *parts),
                         article=article_str,
                         clause=clause_str,
                         point=point_str,
@@ -207,7 +289,7 @@ def chunk_by_legal_structure(
                 else:
                     for sub in splitter.split_text(point_text):
                         add(
-                            sub,
+                            _with_header(sub, *parts),
                             article=article_str,
                             clause=clause_str,
                             point=point_str,
