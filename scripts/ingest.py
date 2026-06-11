@@ -90,7 +90,9 @@ def iter_raw_files(
         if topic_dir.name in ("vectorstore", "processed", "__pycache__"):
             continue
 
-        for txt_path in sorted(topic_dir.glob("*.txt")):
+        # rglob để xử lý cả cấu trúc phẳng (all_laws/*.txt)
+        # lẫn cấu trúc lồng nhau (hf_laws/chi_thi/*.txt, hf_laws/luat/*.txt)
+        for txt_path in sorted(topic_dir.rglob("*.txt")):
             if txt_path.name.endswith(".gitkeep"):
                 continue
             try:
