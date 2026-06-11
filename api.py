@@ -31,7 +31,6 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional
 
 from pathlib import Path
@@ -53,14 +52,12 @@ from src import config
 from src.bm25_index import BM25Index
 from src.embedding import Embedder
 from src.generator import Generator
-from src.guardrails import apply_guardrails
 from src.parent_store import ParentStore
 from src.planner import LegalPlanner
-from src.reranker import rerank as _rerank
+from src.pipeline import LegalPipeline, RETRIEVAL_MODES
 from src.retriever import Retriever
 from src.router import SmartRouter
 from src.schemas import Answer
-from src.state import ConversationState
 from src.tools import LegalToolRegistry
 from src.vectorstore import VectorStore
 
@@ -71,14 +68,6 @@ except Exception:
     _KG_AVAILABLE = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-
-MAX_HISTORY = 10
-
-RETRIEVAL_MODES = {
-    "rag_full":  {"use_kg": False, "use_top10_filter": False},
-    "rag_top10": {"use_kg": False, "use_top10_filter": True},
-    "graph_rag": {"use_kg": True,  "use_top10_filter": True},
-}
 
 MODEL_TO_MODE: dict[str, str] = {
     "legal-ai":        "graph_rag",
@@ -142,8 +131,8 @@ def _load_agent() -> None:
         try:
             data = _json.loads(manifest_path.read_text(encoding="utf-8"))
             top15_urls = [law["source_url"] for law in data.get("laws", []) if law.get("source_url")]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[API] Không đọc được manifest top15 ({manifest_path}): {e} — mode top15 sẽ không filter")
 
     _api_key = {
         "gemini":     config.GEMINI_API_KEY,
@@ -187,6 +176,15 @@ def _load_agent() -> None:
         ollama_client=ollama_client, model=config.LLM_MODEL, tool_registry=tool_registry,
     )
 
+    pipeline = LegalPipeline(
+        retriever=retriever,
+        generator=generator,
+        router=router,
+        tool_registry=tool_registry,
+        top15_urls=top15_urls,
+        export_link_base=config.API_BASE_URL,
+    )
+
     _agent.update({
         "embedder": embedder,
         "vstore": vstore,
@@ -197,6 +195,7 @@ def _load_agent() -> None:
         "planner": planner,
         "tool_registry": tool_registry,
         "top15_urls": top15_urls,
+        "pipeline": pipeline,
     })
 
     print(f"[API] Sẵn sàng — {vstore.count():,} chunks, KG={'✓' if kg_retriever else '✗'}")
@@ -323,7 +322,8 @@ async def get_model(model_id: str, authorization: Optional[str] = Header(None)):
     raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 
 
-_EXPORT_DIR = Path("data/exports")
+# Đường dẫn tuyệt đối theo config — không phụ thuộc CWD lúc chạy uvicorn
+_EXPORT_DIR = config.DATA_DIR / "exports"
 
 @app.get("/v1/export/{filename}")
 async def download_export(filename: str, authorization: Optional[str] = Header(None)):
@@ -410,237 +410,6 @@ async def chat_completions(
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
-def _make_generator(
-    temperature: Optional[float] = None,
-    top_p: Optional[float] = None,
-    llm_model: Optional[str] = None,
-) -> Generator:
-    """Tạo Generator riêng cho request — KHÔNG mutate singleton.
-
-    Hai request đồng thời với model/temperature khác nhau sẽ không ghi đè
-    cấu hình của nhau (trước đây set trực tiếp lên generator dùng chung
-    trong thread pool → race condition).
-    """
-    base: Generator = _agent["generator"]
-    provider, api_key, host, model = base.provider, base.api_key, base.host, base.model
-
-    if llm_model:
-        model = llm_model.strip()
-        if model.startswith(("cc/", "gh/")):
-            provider, api_key, host = "router9", config.ROUTER9_API_KEY, config.ROUTER9_BASE_URL
-        else:
-            # Không có prefix 9Router → mặc định KieAI
-            provider, api_key, host = "kieai", config.KIEAI_API_KEY, config.KIEAI_BASE_URL
-        print(f"  [MODEL] override → {model} (provider={provider})")
-
-    gen = Generator(
-        model=model,
-        host=host,
-        temperature=base.temperature if temperature is None else temperature,
-        num_ctx=base.num_ctx,
-        top_p=base.top_p if top_p is None else top_p,
-        provider=provider,
-        api_key=api_key,
-    )
-    # Cùng provider/host/key → tái dùng client đã connect của singleton
-    # (client chỉ phụ thuộc provider+host+key; model/temperature truyền per-call)
-    if (provider, host, api_key) == (base.provider, base.host, base.api_key):
-        gen._client = base.get_client()
-    return gen
-
-
-@dataclass
-class _PipelinePrep:
-    """Kết quả phase chuẩn bị (router → tool → retrieve) — trước khi generate.
-
-    final_answer được set khi flow đã có câu trả lời hoàn chỉnh
-    (answer_direct, tool tự chứa kết quả, hoặc không có context).
-    """
-    final_answer: Optional[Answer] = None
-    contexts: list = field(default_factory=list)
-    tool_results: list = field(default_factory=list)
-    state_context: str = ""
-    llm_history: list = field(default_factory=list)
-
-
-def _prepare_pipeline(
-    user_input: str,
-    history: list[dict],
-    rag_mode: str,
-    top_k: int = 5,
-    web_search_enabled: bool = True,
-    ce_threshold: float = 0.04,
-) -> _PipelinePrep:
-    """Phase 1 của pipeline: router → tool → retrieve → rerank (synchronous).
-
-    Không gọi generator — phần generate tách riêng để hỗ trợ streaming thật.
-    """
-    retriever     = _agent["retriever"]
-    router        = _agent["router"]
-    tool_registry = _agent["tool_registry"]
-    top15_urls    = _agent["top15_urls"]
-
-    mode_cfg      = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
-    use_kg        = mode_cfg["use_kg"]
-    allowed_sources = top15_urls if mode_cfg["use_top10_filter"] else None
-
-    # Rebuild ConversationState từ history
-    conv_state = ConversationState()
-    for msg in history[-6:]:
-        if msg["role"] == "user":
-            conv_state.update_from_question(msg["content"])
-        elif msg["role"] == "assistant":
-            conv_state.update_from_answer(msg["content"], [])
-    conv_state.update_from_question(user_input)
-
-    llm_history = history[-MAX_HISTORY:]
-
-    # ── Router ────────────────────────────────────────────────────────────────
-    _t0 = time.time()
-    decision = router.route(
-        user_input, history=llm_history,
-        memory_text="", summary_text="",
-        state=conv_state,
-        web_search_enabled=web_search_enabled,
-    )
-    _t_router = time.time() - _t0
-    print(f"  [TIMER] Router   : {_t_router:.2f}s  intent={decision.intent} action={decision.action}")
-
-    # ── Flow A: trả lời trực tiếp ─────────────────────────────────────────────
-    # (chitchat/meta/clarify — không phải tư vấn pháp lý nên không cần disclaimer)
-    if decision.action == "answer_direct":
-        return _PipelinePrep(
-            final_answer=Answer(
-                question=user_input,
-                answer=decision.direct_response or "",
-                citations=[],
-            ),
-            llm_history=llm_history,
-        )
-
-    # ── Flow B: dùng tool ─────────────────────────────────────────────────────
-    if decision.action == "use_tool" and decision.tool_name:
-        tool_name  = decision.tool_name
-        tool_query = decision.tool_query or user_input
-
-        if tool_name == "calculate_fine":
-            tool_result = tool_registry.calculate_fine(description=tool_query)
-
-        elif tool_name == "draft_document":
-            dt, det = (tool_query.split("|", 1) if "|" in tool_query
-                       else ("văn bản pháp lý", tool_query))
-            tool_result = tool_registry.draft_document(
-                doc_type=dt.strip(), details=det.strip(),
-            )
-            # Nếu export DOCX thành công → append download link vào result
-            if tool_result.success and tool_result.docx_path:
-                _fname = Path(tool_result.docx_path).name
-                _api_base = getattr(config, "API_BASE_URL", "http://localhost:8000")
-                _link = (
-                    f"\n\n---\n"
-                    f"📎 **[⬇️ Tải file DOCX]({_api_base}/v1/export/{_fname})**  "
-                    f"*(nhấn để tải về)*"
-                )
-                tool_result = tool_result.__class__(
-                    tool_name=tool_result.tool_name,
-                    success=tool_result.success,
-                    result=tool_result.result + _link,
-                    sources=tool_result.sources,
-                    docx_path=tool_result.docx_path,
-                )
-
-        elif tool_name == "compare_regulations":
-            # tool_query format: "chủ đề A|chủ đề B"
-            if "|" in tool_query:
-                topic_a, topic_b = tool_query.split("|", 1)
-            else:
-                # Tự phân tách từ câu hỏi gốc
-                parts = tool_query.split(" và " if " và " in tool_query else " vs ")
-                topic_a = parts[0].strip()
-                topic_b = parts[1].strip() if len(parts) > 1 else user_input
-            tool_result = tool_registry.compare_regulations(
-                topic_a=topic_a.strip(), topic_b=topic_b.strip(),
-            )
-
-        elif tool_name == "validate_document":
-            # tool_query là nội dung văn bản hoặc mô tả (khi không có file)
-            # Thử tìm nội dung file từ system message trong history
-            doc_text = tool_query
-            for msg in reversed(llm_history):
-                if msg.get("role") == "system" and "file" in msg.get("content", "").lower():
-                    doc_text = msg["content"]
-                    break
-            tool_result = tool_registry.validate_document(
-                document_text=doc_text, filename="",
-            )
-
-        elif tool_name == "knowledge_graph_lookup":
-            tool_result = tool_registry.knowledge_graph_lookup(query=tool_query)
-
-        else:
-            tool_result = tool_registry.execute(tool_name, query=tool_query)
-
-        # Validate và compare đã tự chứa kết quả đầy đủ — trả thẳng không qua generator.
-        # Vẫn áp guardrails (disclaimer pháp lý) nhưng tắt cảnh báo "thiếu căn cứ"
-        # vì kết quả tool đã tự chứa căn cứ.
-        if tool_name in ("validate_document", "compare_regulations") and tool_result.success:
-            ans = Answer(question=user_input, answer=tool_result.result, citations=[])
-            return _PipelinePrep(
-                final_answer=apply_guardrails(ans, [], warn_no_evidence=False),
-                llm_history=llm_history,
-            )
-
-        search_q = decision.search_query or user_input
-        contexts = retriever.retrieve(
-            search_q, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
-        )
-
-        return _PipelinePrep(
-            contexts=contexts,
-            tool_results=[tool_result],
-            state_context=conv_state.to_context_string(),
-            llm_history=llm_history,
-        )
-
-    # ── Flow C: RAG retrieve ──────────────────────────────────────────────────
-    search_query = decision.search_query or user_input
-
-    _t0 = time.time()
-    contexts = retriever.retrieve(
-        search_query, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
-        use_hyde=config.USE_HYDE, use_parent_expansion=True,
-    )
-    _t_retrieve = time.time() - _t0
-    print(f"  [TIMER] Retrieve : {_t_retrieve:.2f}s  ({len(contexts)} chunks)")
-
-    # Rerank — smart skip CrossEncoder nếu RRF score đã cao
-    if contexts:
-        _top_rrf = contexts[0].score
-        _use_ce  = _top_rrf < ce_threshold
-        contexts = _rerank(search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce)
-        print(f"  [TIMER] Rerank   : CE={'on' if _use_ce else 'skip'} threshold={ce_threshold} ({len(contexts)} chunks)")
-
-    if not contexts:
-        ans = Answer(
-            question=user_input,
-            answer=(
-                "Không tìm thấy căn cứ pháp lý trong cơ sở dữ liệu. "
-                "Vui lòng thử câu hỏi khác hoặc tham khảo ý kiến luật sư."
-            ),
-            citations=[],
-        )
-        return _PipelinePrep(
-            final_answer=apply_guardrails(ans, []),
-            llm_history=llm_history,
-        )
-
-    return _PipelinePrep(
-        contexts=contexts,
-        state_context=conv_state.to_context_string(),
-        llm_history=llm_history,
-    )
-
-
 def _run_pipeline(
     user_input: str,
     history: list[dict],
@@ -652,30 +421,12 @@ def _run_pipeline(
     ce_threshold: float = 0.04,
     llm_model: Optional[str] = None,
 ) -> Answer:
-    """Chạy toàn bộ pipeline (synchronous, non-streaming). Trả về Answer."""
-    _t_total = time.time()
-
-    prep = _prepare_pipeline(
-        user_input, history, rag_mode, top_k, web_search_enabled, ce_threshold,
-    )
-    if prep.final_answer is not None:
-        print(f"  [TIMER] TOTAL    : {time.time()-_t_total:.2f}s  (không cần generate)")
-        return prep.final_answer
-
-    generator = _make_generator(temperature, top_p, llm_model)
-
-    _t0 = time.time()
-    answer = generator.generate(
-        user_input, prep.contexts, history=prep.llm_history,
-        tool_results=prep.tool_results or None,
-        state_context=prep.state_context,
-    )
-    print(f"  [TIMER] Generate : {time.time()-_t0:.2f}s")
-    print(f"  [TIMER] TOTAL    : {time.time()-_t_total:.2f}s  ← pipeline time")
-
-    # Tool flow: kết quả tool là căn cứ → không cảnh báo "thiếu căn cứ"
-    return apply_guardrails(
-        answer, prep.contexts, warn_no_evidence=not prep.tool_results,
+    """Wrapper mỏng quanh LegalPipeline.run (logic chung ở src/pipeline.py)."""
+    return _agent["pipeline"].run(
+        user_input, history, rag_mode,
+        top_k=top_k, web_search_enabled=web_search_enabled,
+        temperature=temperature, top_p=top_p,
+        ce_threshold=ce_threshold, llm_model=llm_model,
     )
 
 
@@ -789,12 +540,14 @@ async def _stream_pipeline(
 
     loop = asyncio.get_event_loop()
 
+    pipeline: LegalPipeline = _agent["pipeline"]
+
     # ── Phase 1: router → tool → retrieve (blocking → thread pool) ───────────
     try:
         prep = await loop.run_in_executor(
             None,
             functools.partial(
-                _prepare_pipeline, user_input, history, rag_mode,
+                pipeline.prepare, user_input, history, rag_mode,
                 top_k, web_search_enabled, ce_threshold,
             ),
         )
@@ -813,7 +566,7 @@ async def _stream_pipeline(
         return
 
     # ── Phase 2: stream thật từ LLM ───────────────────────────────────────────
-    generator = _make_generator(temperature, top_p, llm_model)
+    generator = pipeline.make_generator(temperature, top_p, llm_model)
     q: queue.Queue = queue.Queue(maxsize=512)
 
     def _worker() -> None:
@@ -851,10 +604,8 @@ async def _stream_pipeline(
             answer: Answer = payload or Answer(
                 question=user_input, answer=streamed_text, citations=[],
             )
-            guarded = apply_guardrails(
-                answer, prep.contexts, warn_no_evidence=not prep.tool_results,
-            )
-            # apply_guardrails chỉ append vào cuối → phần thêm = đoạn sau text gốc
+            guarded = pipeline.guard(answer, prep)
+            # guardrails chỉ append vào cuối → phần thêm = đoạn sau text gốc
             tail = guarded.answer[len(answer.answer):]
             cit_block = _format_citations(guarded.citations)
             if cit_block:

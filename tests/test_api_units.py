@@ -1,4 +1,4 @@
-"""Unit tests cho api.py: auth, per-request generator, guardrails flows."""
+"""Unit tests cho api.py + src/pipeline.py: auth, per-request generator, guardrails."""
 from __future__ import annotations
 
 import pytest
@@ -8,6 +8,7 @@ import api
 from src import config
 from src.generator import Generator
 from src.guardrails import apply_guardrails
+from src.pipeline import make_generator, resolve_model_provider
 from src.schemas import Answer
 
 
@@ -32,7 +33,7 @@ def test_auth_sai_token_hoac_thieu(monkeypatch):
         api._require_auth(None)
 
 
-# ── _make_generator ────────────────────────────────────────────────────────────
+# ── pipeline.make_generator ────────────────────────────────────────────────────
 
 def _base_generator() -> Generator:
     gen = Generator(
@@ -47,27 +48,30 @@ def _base_generator() -> Generator:
     return gen
 
 
-def test_make_generator_khong_mutate_singleton(monkeypatch):
+def test_make_generator_khong_mutate_base():
     base = _base_generator()
-    monkeypatch.setitem(api._agent, "generator", base)
 
-    gen = api._make_generator(temperature=0.9, llm_model="cc/claude-sonnet-4-6")
+    gen = make_generator(
+        base,
+        provider="router9",
+        model="cc/claude-sonnet-4-6",
+        temperature=0.9,
+    )
 
     assert gen is not base
     assert gen.model == "cc/claude-sonnet-4-6"
     assert gen.temperature == 0.9
-    # Singleton giữ nguyên — không bị request ghi đè
+    # Base giữ nguyên — không bị request ghi đè
     assert base.model == "base-model"
     assert base.temperature == 0.2
     # Cùng provider/host/key → tái dùng client đã connect
     assert gen._client is base._client
 
 
-def test_make_generator_doi_provider_kieai(monkeypatch):
+def test_make_generator_doi_provider_khong_reuse_client():
     base = _base_generator()
-    monkeypatch.setitem(api._agent, "generator", base)
 
-    gen = api._make_generator(llm_model="deepseek-chat")
+    gen = make_generator(base, provider="kieai", model="deepseek-chat")
 
     assert gen.provider == "kieai"
     assert gen.model == "deepseek-chat"
@@ -76,15 +80,20 @@ def test_make_generator_doi_provider_kieai(monkeypatch):
     assert base.provider == "router9"
 
 
-def test_make_generator_mac_dinh_giu_config_base(monkeypatch):
+def test_make_generator_mac_dinh_giu_config_base():
     base = _base_generator()
-    monkeypatch.setitem(api._agent, "generator", base)
 
-    gen = api._make_generator()
+    gen = make_generator(base)
 
     assert gen.model == base.model
     assert gen.temperature == base.temperature
     assert gen._client is base._client
+
+
+def test_resolve_model_provider_theo_prefix():
+    assert resolve_model_provider("cc/claude-sonnet-4-6") == "router9"
+    assert resolve_model_provider("gh/gpt-4o-mini") == "router9"
+    assert resolve_model_provider("deepseek-chat") == "kieai"
 
 
 # ── apply_guardrails: warn_no_evidence ─────────────────────────────────────────

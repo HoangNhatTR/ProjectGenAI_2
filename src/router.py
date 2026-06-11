@@ -12,6 +12,8 @@ THÊM MỚI (Big Update):
 """
 from __future__ import annotations
 
+from loguru import logger
+
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -262,7 +264,8 @@ class SmartRouter:
                 options=_opts,
             )
             raw = response["message"]["content"]
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Router LLM lỗi, dùng fallback heuristic: {exc}")
             return self._fallback(question)
 
         data = _extract_json(raw)

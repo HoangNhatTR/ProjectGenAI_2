@@ -7,6 +7,8 @@ Nâng cấp (Big Update):
 """
 from __future__ import annotations
 
+from loguru import logger
+
 import re
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -408,7 +410,8 @@ class Generator:
             )
             text = response["message"]["content"].strip()
             return text or prev_summary
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Summarize history lỗi, giữ summary cũ: {exc}")
             return prev_summary
 
     def extract_memory_facts(self, question: str, answer: str) -> list[str]:
@@ -423,7 +426,8 @@ class Generator:
                 options={"temperature": 0.0, "num_ctx": 2048, **({"think": False} if self._is_thinking else {})},
             )
             raw = response["message"]["content"]
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Extract memory facts lỗi, bỏ qua: {exc}")
             return []
 
         data = _extract_json(raw)

@@ -83,42 +83,66 @@ Dưới đây là quy trình hoạt động của hệ thống khi người dùn
 
 ---
 
-## Giai đoạn hiện tại: RAG đơn giản
-
-Pipeline khởi đầu (trước khi thêm Knowledge Graph):
+## Kiến trúc hiện tại
 
 ```
-Raw legal docs (PDF/HTML)
-    -> Parsing + Cleaning
-    -> Chunking (theo Điều/Khoản/Điểm)
-    -> Embedding
-    -> Vector DB (Chroma)
-    -> Retriever
-    -> LLM (sinh câu trả lời + trích dẫn nguồn)
+                         ┌──────────────────────────────────────────┐
+User ──► Router (LLM) ──►│ Flow A: answer_direct (chitchat/meta)    │
+                         │ Flow B: tools (tính phạt, soạn văn bản,  │
+                         │         so sánh, validate, KG lookup)    │
+                         │ Flow C: Hybrid RAG                       │
+                         │   Vector (BGE-M3 + Chroma)               │
+                         │   + BM25  + Knowledge Graph (Neo4j)      │
+                         │   → RRF fusion → CrossEncoder rerank     │
+                         │   → Parent-child expansion (full Điều)   │
+                         └────────────────┬─────────────────────────┘
+                                          ▼
+                         Generator (LLM) + Guardrails (disclaimer)
+                                          ▼
+                         Câu trả lời + 📚 trích dẫn Điều/Khoản/Điểm
 ```
+
+Logic pipeline dùng chung nằm ở `src/pipeline.py` (`LegalPipeline`) —
+cả API server lẫn UI đều gọi qua đây.
+
+### Chế độ RAG
+
+| Mode | Mô tả |
+|---|---|
+| `graph_rag` (mặc định) | Vector + BM25 + Knowledge Graph, top 15 luật |
+| `rag_top10` | Vector + BM25, chỉ top 15 luật quan trọng (~7.5k chunks) |
+| `rag_full` | Vector + BM25 trên toàn bộ 609 luật (~68k chunks) |
 
 ### Cấu trúc thư mục
 
 ```
 ProjectGenAI_2/
-├── data/
-│   ├── raw/          # PDF/HTML gốc (gitignored)
-│   ├── processed/    # JSON sau chunking (gitignored)
-│   └── vectorstore/  # Chroma persistent dir (gitignored)
+├── data/                  # raw / processed / vectorstore / bm25 (gitignored)
 ├── src/
-│   ├── schemas.py    # Pydantic models: Chunk, RawDocument, Answer, ...
-│   ├── config.py     # Đọc .env, đường dẫn, hyperparams
-│   ├── parsing.py    # PDF/HTML -> text sạch
-│   ├── chunking.py   # Chunk theo cấu trúc pháp lý
-│   ├── embedding.py  # Wrapper BGE-M3 / sentence-transformers
-│   ├── vectorstore.py# Wrapper Chroma
-│   ├── retriever.py  # Top-k + (sau này) BM25 hybrid + rerank
-│   └── generator.py  # LLM Claude + prompt + citation parsing
-├── scripts/ingest.py # Pipeline ingestion end-to-end
-├── tests/
-├── app.py            # CLI hỏi-đáp
-├── requirements.txt
-└── .env.example
+│   ├── pipeline.py        # LegalPipeline — logic chung cho mọi entry point
+│   ├── config.py          # Đọc .env: model, provider, security
+│   ├── schemas.py         # Pydantic: Chunk, Answer, Citation, ...
+│   ├── parsing.py         # PDF/HTML/DOCX → text sạch
+│   ├── chunking.py        # Chunk theo Điều/Khoản/Điểm + parent-child
+│   ├── embedding.py       # BGE-M3
+│   ├── vectorstore.py     # Chroma
+│   ├── bm25_index.py      # BM25 (rank-bm25)
+│   ├── retriever.py       # Hybrid: vector + BM25 + KG → RRF fusion
+│   ├── reranker.py        # CrossEncoder bge-reranker (smart skip)
+│   ├── router.py          # SmartRouter: intent → flow A/B/C
+│   ├── tools.py           # calculate_fine, draft_document, compare, ...
+│   ├── planner.py         # Multi-step plan cho câu hỏi phức tạp
+│   ├── generator.py       # LLM generate + stream + citations
+│   ├── guardrails.py      # Disclaimer pháp lý, cảnh báo thiếu căn cứ
+│   ├── memory.py / session.py / state.py   # Hội thoại đa lượt
+│   ├── llm_client.py      # Gemini/Groq/9Router/OpenRouter/KieAI clients
+│   └── kg/                # Knowledge Graph: Neo4j extract + retrieve
+├── scripts/               # ingest, crawler, build_bm25, build KG, benchmark
+├── tests/                 # pytest — unit + endpoint tests
+├── api.py                 # FastAPI — OpenAI-compatible API (streaming thật)
+├── ui_app.py              # Streamlit UI (sessions, memory, KG explorer)
+├── app.py                 # CLI hỏi-đáp
+└── notebooks/             # Colab GPU embedding
 ```
 
 ### Cài đặt
@@ -133,20 +157,40 @@ pip install -r requirements.txt
 
 # 3. Config
 Copy-Item .env.example .env
-# rồi điền ANTHROPIC_API_KEY vào .env
+# điền API key của provider muốn dùng (ROUTER9 / KIEAI / GEMINI / GROQ / OPENROUTER)
 ```
 
-### Sử dụng
+### Chạy
+
+```powershell
+# API server (OpenAI-compatible, dùng với legal-chat-ui / open-webui)
+uvicorn api:app --host 0.0.0.0 --port 8000
+
+# Streamlit UI đầy đủ tính năng
+streamlit run ui_app.py
+
+# CLI hỏi-đáp
+python app.py
+
+# Tests
+python -m pytest tests/ -q
+```
+
+### Bảo mật API
+
+Hai biến env trong `.env` (xem `.env.example`):
+
+- `API_AUTH_KEY` — nếu set, mọi request `/v1/*` phải gửi
+  `Authorization: Bearer <key>`. Để trống = không bắt auth (chỉ dùng localhost).
+- `CORS_ORIGINS` — danh sách origin được phép (mặc định localhost:3000/3001/8501).
+
+### Ingest dữ liệu
 
 ```powershell
 # Bỏ PDF/HTML vào data/raw/, sau đó:
-python -m scripts.ingest    # parse + chunk + embed + lưu vector store
-python app.py               # CLI hỏi-đáp tương tác
+python -m scripts.ingest        # parse + chunk + embed + lưu vector store
+python -m scripts.build_bm25    # build BM25 index
+# (tuỳ chọn) Knowledge Graph — cần Neo4j:
+python -m scripts.build_structural_kg
+python -m scripts.build_semantic_kg
 ```
-
-### Trạng thái
-
-Hiện tại các module trong `src/` đều là **stub** (`raise NotImplementedError`).
-Implement theo thứ tự: `parsing` -> `chunking` -> `embedding` -> `vectorstore`
--> `retriever` -> `generator`. Mỗi bước nên có 1 test ở `tests/` xác nhận
-chạy được trên 1 file mẫu trước khi sang bước kế.

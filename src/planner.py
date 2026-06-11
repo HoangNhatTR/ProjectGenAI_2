@@ -14,6 +14,8 @@ Câu hỏi đơn giản ("mức phạt vượt đèn đỏ là gì?") → Plan 1
 """
 from __future__ import annotations
 
+from loguru import logger
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -175,7 +177,8 @@ class LegalPlanner:
 
             return Plan(complexity=complexity, reason=reason, question=question, steps=steps)
 
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Planner LLM lỗi, dùng simple plan: {exc}")
             return _simple_plan(question)
 
     # ── Execute plan ──────────────────────────────────────────────────────────

@@ -10,6 +10,8 @@ như là chứa hành vi pháp lý liên quan tới query — kể cả khi vect
 """
 from __future__ import annotations
 
+from loguru import logger
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -164,7 +166,8 @@ class KGRetriever:
         try:
             with self._get_client().session() as s:
                 rows = s.run(cypher, keywords=keywords).data()
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Neo4j query lỗi, KG trả rỗng: {exc}")
             return []
 
         # Dedupe theo article_id_kg, giữ score cao nhất

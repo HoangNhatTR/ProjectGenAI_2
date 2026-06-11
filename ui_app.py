@@ -26,6 +26,7 @@ from src.generator import Generator
 from src.guardrails import apply_guardrails
 from src.memory import MemoryStore
 from src.parent_store import ParentStore
+from src.pipeline import RETRIEVAL_MODES, make_generator
 from src.planner import LegalPlanner
 from src.reranker import rerank as _rerank
 from src.retriever import Retriever
@@ -172,41 +173,7 @@ SUMMARY_MIN_MESSAGES = 12
 SUMMARY_KEEP_RECENT = 6
 SUMMARY_MAX_RAW = MAX_HISTORY_MESSAGES
 
-RETRIEVAL_MODES = {
-    "rag_full": {
-        "label": "RAG Full",
-        "icon": "📚",
-        "short": "Toàn bộ corpus",
-        "desc": "Vector + BM25 trên toàn bộ 609 luật (~68k chunks)",
-        "use_kg": False,
-        "use_top10_filter": False,
-        "color": "#2563EB",
-        "bg": "#EFF6FF",
-        "border": "#93C5FD",
-    },
-    "rag_top10": {
-        "label": "RAG Top 15",
-        "icon": "🎯",
-        "short": "Top 15 luật",
-        "desc": "Vector + BM25 chỉ trên top 15 luật quan trọng (~7.5k chunks)",
-        "use_kg": False,
-        "use_top10_filter": True,
-        "color": "#059669",
-        "bg": "#ECFDF5",
-        "border": "#6EE7B7",
-    },
-    "graph_rag": {
-        "label": "Graph RAG",
-        "icon": "🕸️",
-        "short": "Vector + KG",
-        "desc": "Vector + BM25 + Knowledge Graph (top 15 luật + KG semantic)",
-        "use_kg": True,
-        "use_top10_filter": True,
-        "color": "#7C3AED",
-        "bg": "#F5F3FF",
-        "border": "#C4B5FD",
-    },
-}
+# RETRIEVAL_MODES import từ src.pipeline (dùng chung với api.py)
 DEFAULT_RETRIEVAL_MODE = "graph_rag"
 
 # ── Chế độ nguồn tài liệu (per-session) ──────────────────────────────────────
@@ -1745,6 +1712,7 @@ def _build_contexts(
     use_hyde: bool = False,
     use_parent_expansion: bool = True,
     ce_threshold: float = 0.04,
+    rrf_k=None,
 ) -> list:
     """Xây dựng contexts theo doc_mode: corpus / docs / combined."""
     if doc_mode == "docs_only":
@@ -1760,6 +1728,7 @@ def _build_contexts(
             query, top_k=corpus_k, min_score=min_score,
             use_kg=use_kg, allowed_sources=allowed_sources,
             use_hyde=use_hyde, use_parent_expansion=use_parent_expansion,
+            rrf_k=rrf_k,
         )
         doc_ctx = doc_store.retrieve(query, top_k=doc_k)
         combined = (corpus_ctx + doc_ctx)[:top_k]
@@ -1773,6 +1742,7 @@ def _build_contexts(
             query, top_k=top_k, min_score=min_score,
             use_kg=use_kg, allowed_sources=allowed_sources,
             use_hyde=use_hyde, use_parent_expansion=use_parent_expansion,
+            rrf_k=rrf_k,
         )
         if ctx:
             _use_ce = ctx[0].score < ce_threshold
@@ -1802,26 +1772,20 @@ def process_question(
     use_parent = st.session_state.use_parent_expansion
     ce_thresh  = st.session_state.ce_threshold
 
-    # Áp dụng tham số generation ngay trước mỗi lượt chat
-    _sel_provider = st.session_state.llm_provider
-    _sel_model    = st.session_state.llm_model
-    # Lấy API key + host theo provider được chọn
-    _provider_cfg = {
-        "router9":    (config.ROUTER9_API_KEY, config.ROUTER9_BASE_URL),
-        "kieai":      (config.KIEAI_API_KEY,   config.KIEAI_BASE_URL),
-        "openrouter": (config.OPENROUTER_API_KEY, config.OPENROUTER_BASE_URL),
-        "gemini":     (config.GEMINI_API_KEY,  config.OLLAMA_HOST),
-        "groq":       (config.GROQ_API_KEY,    config.OLLAMA_HOST),
-    }
-    _api_key, _host = _provider_cfg.get(_sel_provider, ("", config.OLLAMA_HOST))
-    generator.switch_provider(_sel_provider, _api_key, _host)
-    generator.model       = _sel_model
-    generator.temperature = st.session_state.temperature
-    generator.top_p       = st.session_state.top_p
-    generator.num_ctx     = st.session_state.num_ctx
+    # Generator riêng cho lượt chat này — KHÔNG mutate instance trong
+    # @st.cache_resource (dùng chung mọi session/tab → mutate gây race condition
+    # khi 2 tab chọn model/temperature khác nhau).
+    generator = make_generator(
+        agent["generator"],
+        provider=st.session_state.llm_provider,
+        model=st.session_state.llm_model,
+        temperature=st.session_state.temperature,
+        top_p=st.session_state.top_p,
+        num_ctx=st.session_state.num_ctx,
+    )
 
-    # Áp dụng RRF K
-    retriever.rrf_k = st.session_state.rrf_k
+    # RRF K truyền per-query qua _build_contexts (không mutate retriever.rrf_k)
+    rrf_k = st.session_state.rrf_k
 
     mode_key = _get_session_mode(session.id)
     mode_cfg = RETRIEVAL_MODES[mode_key]
@@ -1930,7 +1894,7 @@ def process_question(
                     search_q, top_k, min_score, use_kg, allowed_sources,
                     retriever, doc_store, doc_mode, agent,
                     use_hyde=use_hyde, use_parent_expansion=use_parent,
-                    ce_threshold=ce_thresh,
+                    ce_threshold=ce_thresh, rrf_k=rrf_k,
                 )
                 trace["n_contexts"] = len(contexts)
 
@@ -1961,7 +1925,7 @@ def process_question(
                 search_query, top_k, min_score, use_kg, allowed_sources,
                 retriever, doc_store, doc_mode, agent,
                 use_hyde=use_hyde, use_parent_expansion=use_parent,
-                ce_threshold=ce_thresh,
+                ce_threshold=ce_thresh, rrf_k=rrf_k,
             )
             trace["n_contexts"] = len(contexts)
             trace["search_query"] = search_query

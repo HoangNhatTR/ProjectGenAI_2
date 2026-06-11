@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from loguru import logger
+
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -99,7 +101,8 @@ class VectorStore:
         self._connect()
         try:
             result = self._collection.get(where=where, limit=limit)
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Chroma get_by_filter lỗi (where={where}): {exc}")
             return []
         chunks: list[Chunk] = []
         ids = result.get("ids") or []
