@@ -177,24 +177,52 @@ def main() -> None:
     total_docs    = 0
     total_chunks  = 0
     skipped       = 0
+    skipped_dup   = 0
     buffer: list  = []
+    seen_sources: set[str] = set()  # URL đã xử lý trong run này (chống file trùng URL)
     t_start       = time.time()
 
     def _flush() -> None:
-        """Embed + lưu toàn bộ buffer hiện tại."""
+        """Embed + lưu toàn bộ buffer hiện tại.
+
+        An toàn 2 lớp:
+          - Dedup chunk_id trong buffer (2 file cùng URL → cùng prefix → id trùng
+            → Chroma từ chối CẢ batch 'Expected IDs to be unique')
+          - finally: buffer LUÔN được clear — một flush lỗi chỉ mất tối đa
+            ~1 buffer chunks, không nhiễm độc mọi flush sau (bug run trước)
+        """
         nonlocal total_chunks
         if not buffer:
             return
-        embeddings = embedder.encode([c.text for c in buffer])
-        for i in range(0, len(buffer), STORE_SLICE):
-            store.add(buffer[i:i + STORE_SLICE], embeddings[i:i + STORE_SLICE])
-        total_chunks += len(buffer)
-        buffer.clear()
+        seen_ids: set[str] = set()
+        unique = []
+        for c in buffer:
+            if c.chunk_id in seen_ids:
+                continue
+            seen_ids.add(c.chunk_id)
+            unique.append(c)
+        if len(unique) < len(buffer):
+            print(f"  [!] Bỏ {len(buffer) - len(unique)} chunks trùng chunk_id trong buffer")
+        try:
+            embeddings = embedder.encode([c.text for c in unique])
+            for i in range(0, len(unique), STORE_SLICE):
+                store.add(unique[i:i + STORE_SLICE], embeddings[i:i + STORE_SLICE])
+            total_chunks += len(unique)
+        except Exception as exc:
+            print(f"  [!] Flush lỗi, mất {len(unique)} chunks của buffer này: {exc}")
+        finally:
+            buffer.clear()
 
     for path, meta in iter_raw_files(config.RAW_DIR, topic_filter=args.topic):
         if args.skip_existing and meta.source in existing_sources:
             skipped += 1
             continue
+        # File trùng URL (cùng văn bản crawl 2 lần, thiếu ngày nên không bị
+        # dedup offline) → bỏ qua bản thứ 2 trở đi
+        if meta.source in seen_sources:
+            skipped_dup += 1
+            continue
+        seen_sources.add(meta.source)
         try:
             doc    = load_document(path, meta)
             chunks = chunk_document(doc, parent_store=parent_store)
@@ -226,6 +254,8 @@ def main() -> None:
         print(f"Throughput trung bình: {total_chunks/elapsed:.0f} chunks/s")
     if skipped:
         print(f"Đã bỏ qua: {skipped:,} tài liệu (--skip-existing).")
+    if skipped_dup:
+        print(f"Đã bỏ qua: {skipped_dup:,} file trùng URL (cùng văn bản).")
     print(f"Store total: {store.count():,} chunks")
     if parent_store:
         print(f"Parent store total: {parent_store.count():,} entries")
