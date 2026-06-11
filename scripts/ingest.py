@@ -158,13 +158,14 @@ def main() -> None:
         print("Reset vector collection...")
         store.reset()
 
-    # Load 1 lần set sources đã có để skip
+    # Load 1 lần set sources đã có để skip (đọc thẳng sqlite — vài giây
+    # thay vì hàng chục phút quét API với store hàng triệu chunks)
     existing_sources: set[str] = set()
     if args.skip_existing:
         print("Đang đọc danh sách doc đã embed trong store...")
-        for c in store.iter_all_chunks():
-            existing_sources.add(c.metadata.source)
-        print(f"  → {len(existing_sources)} doc đã có, sẽ bỏ qua.")
+        _t0 = time.time()
+        existing_sources = store.distinct_sources()
+        print(f"  → {len(existing_sources):,} doc đã có, sẽ bỏ qua ({time.time()-_t0:.1f}s).")
 
     # ── Global batching ───────────────────────────────────────────────────────
     # Gom chunks từ nhiều file vào buffer rồi embed 1 lần → GPU luôn chạy

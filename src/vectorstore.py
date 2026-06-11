@@ -143,11 +143,90 @@ class VectorStore:
         self._connect()
         return self._collection.count()
 
+    # ── Full scan ──────────────────────────────────────────────────────────────
+    # Chroma .get(offset=N) quét lại từ đầu mỗi trang → O(n²) toàn cục.
+    # Với store hàng triệu chunks, API pagination mất hàng chục phút đến hàng giờ.
+    # → Đường nhanh: đọc thẳng chroma.sqlite3 (1 pass ORDER BY, vài chục giây).
+
+    def distinct_sources(self) -> set[str]:
+        """Tập metadata.source của mọi chunk — dùng cho ingest --skip-existing.
+
+        Đọc thẳng SQLite (giây) thay vì iter toàn bộ chunks (chục phút).
+        Fallback API scan nếu schema Chroma thay đổi.
+        """
+        db = self.persist_dir / "chroma.sqlite3"
+        if db.exists():
+            try:
+                import sqlite3
+                con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+                try:
+                    rows = con.execute(
+                        "SELECT DISTINCT string_value FROM embedding_metadata "
+                        "WHERE key = 'source'"
+                    ).fetchall()
+                finally:
+                    con.close()
+                return {r[0] for r in rows if r[0]}
+            except Exception as exc:
+                logger.warning(f"distinct_sources: sqlite trực tiếp lỗi ({exc}) — fallback API scan")
+        return {c.metadata.source for c in self.iter_all_chunks()}
+
     def iter_all_chunks(self, batch_size: int = 1000) -> Iterator[Chunk]:
         """Yield mọi chunk trong collection (dùng để rebuild BM25 sau ingest).
 
-        Phân trang qua `limit`/`offset` để không OOM với collection lớn.
+        Thử đường nhanh SQLite (1 pass); fallback API pagination nếu lỗi
+        ngay từ đầu. Lỗi GIỮA chừng stream sqlite sẽ raise (không fallback
+        để tránh yield trùng chunk).
         """
+        db = self.persist_dir / "chroma.sqlite3"
+        if db.exists():
+            gen = None
+            try:
+                gen = self._iter_all_chunks_sqlite(db)
+                first = next(gen, None)  # lỗi schema lộ ra ngay tại đây
+            except Exception as exc:
+                logger.warning(f"iter_all_chunks: sqlite trực tiếp lỗi ({exc}) — fallback API pagination")
+            else:
+                if first is not None:
+                    yield first
+                    yield from gen
+                return
+        yield from self._iter_all_chunks_paged(batch_size)
+
+    def _iter_all_chunks_sqlite(self, db: Path) -> Iterator[Chunk]:
+        """Stream chunks từ chroma.sqlite3 — 1 pass, không offset re-scan."""
+        import sqlite3
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+        try:
+            cur = con.execute(
+                "SELECT e.embedding_id, m.key, m.string_value, m.int_value, "
+                "       m.float_value, m.bool_value "
+                "FROM embedding_metadata m "
+                "JOIN embeddings e ON e.id = m.id "
+                "ORDER BY m.id"
+            )
+            cur_id: Optional[str] = None
+            meta: dict = {}
+            text = ""
+            for eid, key, sv, iv, fv, bv in cur:
+                if eid != cur_id:
+                    if cur_id is not None:
+                        yield _chroma_to_chunk(cur_id, text, meta)
+                    cur_id, meta, text = eid, {}, ""
+                if key == "chroma:document":
+                    text = sv or ""
+                else:
+                    val = sv if sv is not None else (
+                        iv if iv is not None else (fv if fv is not None else bv)
+                    )
+                    meta[key] = val
+            if cur_id is not None:
+                yield _chroma_to_chunk(cur_id, text, meta)
+        finally:
+            con.close()
+
+    def _iter_all_chunks_paged(self, batch_size: int = 1000) -> Iterator[Chunk]:
+        """Fallback: phân trang qua API `limit`/`offset` (chậm với store lớn)."""
         self._connect()
         offset = 0
         while True:
