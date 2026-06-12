@@ -13,6 +13,13 @@ PROCESSED_DIR = DATA_DIR / "processed"
 VECTORSTORE_DIR = Path(os.getenv("VECTORSTORE_DIR", DATA_DIR / "vectorstore"))
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+
+# ── Vector backend ─────────────────────────────────────────────────────────────
+# chroma     : Chroma local (mặc định) + lexical FTS5/BM25
+# opensearch : OpenSearch server — vector kNN + BM25 native trong 1 index
+VECTOR_BACKEND   = os.getenv("VECTOR_BACKEND", "chroma")
+OPENSEARCH_URL   = os.getenv("OPENSEARCH_URL", "http://localhost:9200")
+OPENSEARCH_INDEX = os.getenv("OPENSEARCH_INDEX", "legal_chunks")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")  # ollama | gemini | groq | router9 | openrouter
 LLM_MODEL = os.getenv("LLM_MODEL", "mistral:latest")
 # Model riêng cho Router (nhỏ/nhanh hơn, chỉ cần xuất JSON)

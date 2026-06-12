@@ -1,0 +1,33 @@
+# OpenSearch single-node cho Legal AI Agent (vector kNN + BM25)
+#
+# Chạy:    docker compose -f docker-compose.opensearch.yml up -d
+# Kiểm tra: curl http://localhost:9200
+# Dừng:    docker compose -f docker-compose.opensearch.yml down   (data giữ trong volume)
+#
+# Yêu cầu máy: ≥16GB RAM (heap 4GB + page cache cho HNSW lucene ~20GB index)
+# ⚠ Security plugin TẮT — chỉ bind localhost, KHÔNG expose ra internet.
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: legalai-opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - OPENSEARCH_JAVA_OPTS=-Xms4g -Xmx4g
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:

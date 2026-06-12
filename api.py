@@ -104,20 +104,27 @@ def _load_agent() -> None:
     print("[API] Đang khởi tạo Legal AI Agent…")
 
     embedder = Embedder(config.EMBEDDING_MODEL)
-    vstore = VectorStore(config.VECTORSTORE_DIR, config.COLLECTION_NAME)
 
-    bm25_path = config.DATA_DIR / "bm25" / "index.json"
-    bm25 = BM25Index(bm25_path) if bm25_path.exists() else None
-    if bm25 is None:
-        # Không có index.json (hoặc quá nặng để build) → dùng FTS5 có sẵn
-        # trong chroma.sqlite3 làm nhánh lexical — zero RAM, zero build
-        from src.fts_index import ChromaFTSIndex
-        _fts = ChromaFTSIndex(config.VECTORSTORE_DIR)
-        if _fts.is_available():
-            bm25 = _fts
-            print("[API] Lexical      : ChromaFTS (FTS5 trong chroma.sqlite3)")
-        else:
-            print("[API] Lexical      : TẮT (không có BM25 index lẫn FTS)")
+    if config.VECTOR_BACKEND == "opensearch":
+        # OpenSearch: vector kNN + BM25 native — backend query trực tiếp
+        from src.opensearch_store import OpenSearchLexicalIndex, OpenSearchVectorStore
+        vstore = OpenSearchVectorStore(config.OPENSEARCH_URL, config.OPENSEARCH_INDEX)
+        bm25 = OpenSearchLexicalIndex(vstore)
+        print(f"[API] Backend      : OpenSearch @ {config.OPENSEARCH_URL} (vector + BM25)")
+    else:
+        vstore = VectorStore(config.VECTORSTORE_DIR, config.COLLECTION_NAME)
+        bm25_path = config.DATA_DIR / "bm25" / "index.json"
+        bm25 = BM25Index(bm25_path) if bm25_path.exists() else None
+        if bm25 is None:
+            # Không có index.json (hoặc quá nặng để build) → dùng FTS5 có sẵn
+            # trong chroma.sqlite3 làm nhánh lexical — zero RAM, zero build
+            from src.fts_index import ChromaFTSIndex
+            _fts = ChromaFTSIndex(config.VECTORSTORE_DIR)
+            if _fts.is_available():
+                bm25 = _fts
+                print("[API] Lexical      : ChromaFTS (FTS5 trong chroma.sqlite3)")
+            else:
+                print("[API] Lexical      : TẮT (không có BM25 index lẫn FTS)")
 
     kg_retriever = None
     if _KG_AVAILABLE:
