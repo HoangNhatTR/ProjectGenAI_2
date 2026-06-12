@@ -199,33 +199,8 @@ class Generator:
 
     def _connect(self) -> None:
         if self._client is None:
-            if self.provider == "gemini":
-                from .llm_client import GeminiClient
-                self._client = GeminiClient(api_key=self.api_key or "")
-            elif self.provider == "groq":
-                from .llm_client import GroqClient
-                self._client = GroqClient(api_key=self.api_key or "")
-            elif self.provider == "router9":
-                from .llm_client import Router9Client
-                self._client = Router9Client(
-                    api_key=self.api_key or "",
-                    base_url=self.host,
-                )
-            elif self.provider == "openrouter":
-                from .llm_client import OpenRouterClient
-                self._client = OpenRouterClient(
-                    api_key=self.api_key or "",
-                    base_url=self.host,
-                )
-            elif self.provider == "kieai":
-                from .llm_client import KieAIClient
-                self._client = KieAIClient(
-                    api_key=self.api_key or "",
-                    base_url=self.host,
-                )
-            else:
-                from ollama import Client
-                self._client = Client(host=self.host)
+            from .llm_client import create_client
+            self._client = create_client(self.provider, self.api_key or "", self.host)
 
     def switch_provider(self, provider: str, api_key: str, host: str) -> None:
         """Đổi provider runtime — reset client để reconnect."""

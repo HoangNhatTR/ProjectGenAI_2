@@ -1,11 +1,36 @@
-"""LLM client wrappers: GeminiClient và GroqClient — drop-in replacements cho ollama.Client.
+"""LLM client wrappers — drop-in replacements cho ollama.Client.
 
 Interface chat() giống hệt Ollama để các module Generator, Router, Tools,
 Planner không cần thay đổi logic gọi LLM.
+
+Dùng create_client() làm factory duy nhất — KHÔNG tự if/elif provider ở nơi
+khác (Generator và Router từng có 2 bản copy lệch nhau: router thiếu kieai
+→ rơi vào nhánh ollama → crash trên môi trường không cài ollama).
 """
 from __future__ import annotations
 
 from typing import Any, Optional
+
+
+def create_client(
+    provider: str,
+    api_key: str = "",
+    host: str = "http://localhost:11434",
+) -> Any:
+    """Factory chung: provider → LLM client cùng interface chat()."""
+    if provider == "gemini":
+        return GeminiClient(api_key=api_key or "")
+    if provider == "groq":
+        return GroqClient(api_key=api_key or "")
+    if provider == "router9":
+        return Router9Client(api_key=api_key or "", base_url=host)
+    if provider == "openrouter":
+        return OpenRouterClient(api_key=api_key or "", base_url=host)
+    if provider == "kieai":
+        return KieAIClient(api_key=api_key or "", base_url=host)
+    # Mặc định: Ollama local
+    from ollama import Client
+    return Client(host=host)
 
 
 class GeminiClient:
