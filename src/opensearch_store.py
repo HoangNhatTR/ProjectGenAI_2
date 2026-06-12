@@ -41,6 +41,11 @@ INDEX_MAPPING: dict = {
         }
     },
     "mappings": {
+        # KHÔNG lưu embedding trong _source — vector đã nằm trong KNN index,
+        # lưu thêm bản JSON ~8KB/doc nữa là +40GB vô ích cho 4.9M docs
+        # (đã suýt tràn disk vì thiếu dòng này). Trade-off: không re-export
+        # được vectors TỪ OpenSearch — nguồn gốc là parquet shards trên HF.
+        "_source": {"excludes": ["embedding"]},
         "properties": {
             "text":      {"type": "text"},
             "embedding": {
