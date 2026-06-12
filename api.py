@@ -54,7 +54,7 @@ from src.embedding import Embedder
 from src.generator import Generator
 from src.parent_store import ParentStore
 from src.planner import LegalPlanner
-from src.pipeline import LegalPipeline, RETRIEVAL_MODES
+from src.pipeline import LegalPipeline, RETRIEVAL_MODES, provider_credentials
 from src.retriever import Retriever
 from src.router import SmartRouter
 from src.schemas import Answer
@@ -134,17 +134,9 @@ def _load_agent() -> None:
         except Exception as e:
             print(f"[API] Không đọc được manifest top15 ({manifest_path}): {e} — mode top15 sẽ không filter")
 
-    _api_key = {
-        "gemini":     config.GEMINI_API_KEY,
-        "groq":       config.GROQ_API_KEY,
-        "router9":    config.ROUTER9_API_KEY,
-        "openrouter": config.OPENROUTER_API_KEY,
-    }.get(config.LLM_PROVIDER)
-
-    _llm_host = {
-        "router9":    config.ROUTER9_BASE_URL,
-        "openrouter": config.OPENROUTER_BASE_URL,
-    }.get(config.LLM_PROVIDER, config.OLLAMA_HOST)
+    # Map provider → (key, host) dùng chung từ pipeline — bug cũ: dict local
+    # thiếu "kieai" → api_key=None + host rơi về Ollama → crash lúc startup
+    _api_key, _llm_host = provider_credentials(config.LLM_PROVIDER)
 
     generator = Generator(
         model=config.LLM_MODEL, host=_llm_host,
