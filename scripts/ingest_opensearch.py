@@ -41,6 +41,8 @@ def _iter_shard_paths(local_dir: str | None):
             yield p.name, p, (lambda: None)
         return
 
+    from concurrent.futures import ThreadPoolExecutor
+
     from huggingface_hub import HfApi, hf_hub_download
     token = os.getenv("HF_TOKEN", "")
     assert token, "Thiếu HF_TOKEN trong .env để tải shards từ HF"
@@ -50,13 +52,23 @@ def _iter_shard_paths(local_dir: str | None):
         if f.startswith(HF_PREFIX) and f.endswith(".parquet")
     )
     assert names, f"Không thấy shard nào tại {HF_REPO}/{HF_PREFIX} — chạy export_embeddings trước"
-    print(f"Tìm thấy {len(names)} shards trên HF")
-    for name in names:
-        path = Path(hf_hub_download(
+    print(f"Tìm thấy {len(names)} shards trên HF", flush=True)
+
+    def _dl(name: str) -> Path:
+        return Path(hf_hub_download(
             repo_id=HF_REPO, repo_type="dataset", filename=name,
             token=token, local_dir="data/_os_ingest_tmp",
         ))
-        yield name, path, path.unlink
+
+    # Prefetch: tải shard i+1 trong lúc shard i đang được index —
+    # download (nghẽn mạng) và indexing (nghẽn CPU/disk) chồng lên nhau
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(_dl, names[0])
+        for i, name in enumerate(names):
+            path = fut.result()
+            if i + 1 < len(names):
+                fut = pool.submit(_dl, names[i + 1])
+            yield name, path, path.unlink
 
 
 def main() -> None:
@@ -109,7 +121,8 @@ def main() -> None:
             n_err = len(errors) if isinstance(errors, list) else errors
             total += ok
             rate = total / (time.time() - t0)
-            print(f"  {name}: +{ok:,} docs (lỗi: {n_err}) | tổng {total:,} | {rate:.0f} docs/s")
+            print(f"  {name}: +{ok:,} docs (lỗi: {n_err}) | tổng {total:,} | {rate:.0f} docs/s",
+                  flush=True)
             cleanup()
     finally:
         cli.indices.put_settings(index=config.OPENSEARCH_INDEX,
