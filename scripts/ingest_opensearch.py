@@ -26,6 +26,9 @@ for _s in (sys.stdout, sys.stderr):
 
 os.environ.setdefault("HF_HUB_OFFLINE", "0")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "0")
+# Trình tải Rust đa kết nối — nhanh hơn nhiều lần trên đường truyền
+# quốc tế bị bóp băng thông (cần: pip install hf_transfer)
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 from src import config  # noqa: E402
 from src.opensearch_store import OpenSearchVectorStore  # noqa: E402
@@ -103,22 +106,33 @@ def main() -> None:
             ids = table.column("id").to_pylist()
             texts = table.column("text").to_pylist()
             metas = table.column("metadata").to_pylist()
-            embs = table.column("embedding").to_pylist()
+            # Decode embeddings qua numpy (nhanh hơn nhiều lần to_pylist cả cột)
+            emb_np = (
+                table.column("embedding").combine_chunks()
+                .flatten().to_numpy(zero_copy_only=False)
+                .reshape(len(table), -1)
+            )
 
             def _actions():
-                for cid, text, meta_json, emb in zip(ids, texts, metas, embs):
+                for i, (cid, text, meta_json) in enumerate(zip(ids, texts, metas)):
                     doc = json.loads(meta_json) if meta_json else {}
                     doc.pop("chroma:document", None)
                     doc["text"] = text
-                    doc["embedding"] = emb
+                    doc["embedding"] = emb_np[i].tolist()
                     yield {"_op_type": "index", "_index": config.OPENSEARCH_INDEX,
                            "_id": cid, "_source": doc}
 
-            ok, errors = helpers.bulk(
-                cli, _actions(), chunk_size=500, request_timeout=180,
-                raise_on_error=False, max_retries=3,
-            )
-            n_err = len(errors) if isinstance(errors, list) else errors
+            # parallel_bulk: serialize + gửi song song 4 luồng — nút thắt
+            # client-side 1 luồng từng làm ingest chậm ~5x
+            ok = n_err = 0
+            for success, _item in helpers.parallel_bulk(
+                cli, _actions(), thread_count=4, chunk_size=500,
+                queue_size=8, request_timeout=180, raise_on_error=False,
+            ):
+                if success:
+                    ok += 1
+                else:
+                    n_err += 1
             total += ok
             rate = total / (time.time() - t0)
             print(f"  {name}: +{ok:,} docs (lỗi: {n_err}) | tổng {total:,} | {rate:.0f} docs/s",

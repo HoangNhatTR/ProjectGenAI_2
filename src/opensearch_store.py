@@ -40,7 +40,9 @@ INDEX_MAPPING: dict = {
                     "name": "hnsw",
                     "engine": "lucene",          # page-cache friendly, không bắt RAM
                     "space_type": "cosinesimil",
-                    "parameters": {"m": 16, "ef_construction": 128},
+                    # m=16/efc=100: cân bằng tốc độ build (4.9M vectors trên
+                    # máy cá nhân) vs recall — recall@10 vẫn >0.95 cho 1024-dim
+                    "parameters": {"m": 16, "ef_construction": 100},
                 },
             },
             # Metadata — keyword để filter chính xác
