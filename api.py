@@ -108,6 +108,16 @@ def _load_agent() -> None:
 
     bm25_path = config.DATA_DIR / "bm25" / "index.json"
     bm25 = BM25Index(bm25_path) if bm25_path.exists() else None
+    if bm25 is None:
+        # Không có index.json (hoặc quá nặng để build) → dùng FTS5 có sẵn
+        # trong chroma.sqlite3 làm nhánh lexical — zero RAM, zero build
+        from src.fts_index import ChromaFTSIndex
+        _fts = ChromaFTSIndex(config.VECTORSTORE_DIR)
+        if _fts.is_available():
+            bm25 = _fts
+            print("[API] Lexical      : ChromaFTS (FTS5 trong chroma.sqlite3)")
+        else:
+            print("[API] Lexical      : TẮT (không có BM25 index lẫn FTS)")
 
     kg_retriever = None
     if _KG_AVAILABLE:
