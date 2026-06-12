@@ -28,6 +28,16 @@ INDEX_MAPPING: dict = {
             "knn": True,
             "number_of_shards": 2,
             "number_of_replicas": 0,
+            # Đo thực tế trên Docker/Windows: fsync translog mỗi bulk request
+            # làm ingest chậm 7x (41→285 docs/s khi chuyển async).
+            # Trade-off: crash mất tối đa 30s ghi cuối — chấp nhận được
+            # cho index ingest-một-lần.
+            "translog.durability": "async",
+            "translog.sync_interval": "30s",
+            "translog.flush_threshold_size": "1gb",
+            # Segment < 50k docs không build HNSW graph (build khi merge) —
+            # tránh build lãng phí cho segment nhỏ bị merge ngay sau đó
+            "knn.advanced.approximate_threshold": "50000",
         }
     },
     "mappings": {

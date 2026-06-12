@@ -144,6 +144,20 @@ def main() -> None:
 
     cli.indices.refresh(index=config.OPENSEARCH_INDEX)
     print(f"\n✓ Ingest xong: {store.count():,} docs sau {(time.time()-t0)/60:.1f} phút")
+
+    # Force merge: gộp segments + build HNSW graph cho segment lớn
+    # (đi cùng knn.advanced.approximate_threshold) → query nhanh hơn nhiều.
+    # Có thể mất 30-60 phút với index ~25GB — chạy ngầm phía server.
+    print("Force merge segments (nền, có thể 30-60 phút)...", flush=True)
+    try:
+        cli.indices.forcemerge(
+            index=config.OPENSEARCH_INDEX, max_num_segments=5,
+            params={"wait_for_completion": "false"},
+        )
+        print("  → đã kích hoạt merge nền — theo dõi: GET _cat/segments/legal_chunks")
+    except Exception as exc:
+        print(f"  [!] forcemerge lỗi (không nghiêm trọng): {exc}")
+
     print("Đặt trong .env:  VECTOR_BACKEND=opensearch")
 
 
