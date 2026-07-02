@@ -18,10 +18,48 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+from .intent_classifier import (
+    IntentClassifier,
+    has_validation_target,
+    history_has_document,
+)
 from .utils import extract_json as _extract_json
 
 if TYPE_CHECKING:
     from .state import ConversationState
+
+
+# ─── Danh tính bot (cố định, KHÔNG để LLM tự khai tên model bên dưới) ─────────
+BOT_NAME = "Legal AI Agent"
+
+# Câu giới thiệu chuẩn — trả thẳng cho câu hỏi danh tính, không gọi LLM nên
+# luôn nhất quán và không bao giờ lộ tên mô hình thật (Claude/DeepSeek/GPT...).
+BOT_INTRO = (
+    "Xin chào! Tôi là **Legal AI Agent** — trợ lý tư vấn pháp luật Việt Nam. "
+    "Tôi có thể giúp bạn:\n\n"
+    "✓ Tra cứu quy định, mức phạt, thủ tục pháp lý\n"
+    "✓ Tư vấn tình huống pháp lý cá nhân\n"
+    "✓ So sánh quy định giữa các trường hợp\n"
+    "✓ Tính tổng mức phạt cho nhiều hành vi vi phạm\n"
+    "✓ Soạn thảo văn bản pháp lý (đơn, hợp đồng…)\n"
+    "✓ Kiểm tra và phân tích văn bản đã upload\n"
+    "✓ Tra cứu thông tin về hành vi, tội danh\n\n"
+    "Bạn có câu hỏi pháp lý nào cần tôi giúp không?"
+)
+
+# Câu hỏi về danh tính / mô hình → trả lời cố định (BOT_INTRO), bỏ qua LLM.
+# Giữ pattern bám "bạn"/"dùng" để tránh trùng câu hỏi pháp lý thật.
+_IDENTITY_RE = re.compile(
+    r"bạn là ai|bạn là gì|bạn là (con )?(bot|chatbot|trợ lý|model|ai|gì)|"
+    r"bạn tên (gì|là gì)|tên (của )?bạn|"
+    r"giới thiệu (về )?(bản thân|bạn|mình|chính mình)|bạn tự giới thiệu|"
+    r"(dùng|sử dụng|chạy bằng|chạy trên|powered by) (model|mô hình|llm|ai|gpt|claude|deepseek|gemini)|"
+    r"bạn (là|dùng|xài) (gpt|chatgpt|claude|deepseek|gemini)|"
+    r"model (gì|nào)|mô hình (gì|nào)|"
+    r"ai (tạo|làm|phát triển|xây dựng) ra bạn|bạn do ai|"
+    r"bạn (có thể )?(làm|giúp) (được )?(gì|những gì|được gì|được những gì)",
+    re.IGNORECASE,
+)
 
 
 # ─── Prompt ───────────────────────────────────────────────────────────────────
@@ -44,8 +82,12 @@ Câu hỏi mới của người dùng: {question}
 - legal      : hỏi thông tin quy định / mức phạt / thủ tục cụ thể → CẦN tra cứu
 - consulting : yêu cầu tư vấn tình huống pháp lý cá nhân → CẦN tra cứu
 - compare    : so sánh quy định giữa 2 đối tượng/luật/tình huống → DÙNG TOOL compare_regulations
-- calculate  : hỏi mức phạt / xử phạt hành chính cho 1 hoặc nhiều hành vi vi phạm giao thông → DÙNG TOOL calculate_fine
-               Nhận diện: "phạt bao nhiêu", "mức phạt", "bị phạt", "xử phạt", "tiền phạt", "vi phạm ... phạt"
+- calculate  : yêu cầu TÍNH TOÁN/CỘNG DỒN mức phạt cho tình huống có TỪ 2 HÀNH VI vi phạm
+               trở lên → DÙNG TOOL calculate_fine
+               Nhận diện: liệt kê nhiều lỗi ("vừa vượt đèn đỏ vừa không đội mũ"), "tổng cộng
+               bị phạt bao nhiêu", "tính tổng tiền phạt"
+               ⚠ Hỏi mức phạt của MỘT hành vi đơn lẻ ("vượt đèn đỏ phạt bao nhiêu tiền?")
+               KHÔNG phải calculate — đó là intent "legal" (tra cứu thông thường, action=retrieve)
 - draft      : yêu cầu soạn đơn / văn bản / hợp đồng → DÙNG TOOL draft_document
 - validate   : yêu cầu kiểm tra / phân tích văn bản đã upload (bản án, hợp đồng, quyết định...) → DÙNG TOOL validate_document
 - kg_query   : hỏi cụ thể về 1 HÀNH VI / TỘI DANH → DÙNG TOOL knowledge_graph_lookup
@@ -93,7 +135,11 @@ Câu hỏi mới của người dùng: {question}
    - direct_response = câu trả lời ngắn gọn tiếng Việt
    - Với clarify: đặt 1-2 câu hỏi cụ thể để user bổ sung
    - Với chitchat: trả lời tự nhiên, mời hỏi pháp lý
-   - Với meta: giới thiệu ngắn
+   - Với meta: giới thiệu ngắn. LUÔN xưng tên là "Legal AI Agent — trợ lý tư vấn
+     pháp luật Việt Nam". TUYỆT ĐỐI KHÔNG tiết lộ hay nhắc tên mô hình / nhà cung
+     cấp đứng sau (Claude, Claude Code, ChatGPT, GPT, DeepSeek, Gemini, Anthropic,
+     OpenAI, Google...). Nếu bị hỏi "dùng AI/model gì", trả lời rằng bạn là trợ lý
+     pháp luật Legal AI Agent, không nêu tên mô hình nền tảng.
 
 NHẬN DIỆN "validate": khi user nói "kiểm tra", "phân tích văn bản", "tìm sai sót",
 "bản án này đúng không", "hợp đồng này có vấn đề gì", "chỉ ra sai phạm", hoặc có file đính kèm.
@@ -161,12 +207,15 @@ class SmartRouter:
         max_history_turns: int = 4,
         provider: str = "ollama",
         api_key: Optional[str] = None,
+        classifier: Optional[IntentClassifier] = None,
     ):
         self.model = model
         self.host = host
         self.max_history_turns = max_history_turns
         self.provider = provider
         self.api_key = api_key
+        # Classifier tất định: chạy TRƯỚC LLM. None → router LLM-only như cũ.
+        self.classifier = classifier
         self._client: Optional[Any] = None
 
     def _connect(self) -> None:
@@ -193,6 +242,35 @@ class SmartRouter:
             state:              ConversationState hiện tại
             web_search_enabled: nếu False, loại web_search khỏi prompt
         """
+        # ── Fast-path danh tính ───────────────────────────────────────────────
+        # "bạn là ai / dùng model gì / làm được gì" → trả câu giới thiệu cố định,
+        # KHÔNG gọi LLM. Vừa nhanh, vừa tránh model nền (Claude/DeepSeek...) tự
+        # khai tên thật (vd "Claude Code") khi router chạy provider khác generator.
+        if _IDENTITY_RE.search(question or ""):
+            logger.info("Router fast-path: câu hỏi danh tính → BOT_INTRO cố định")
+            return RouterDecision(
+                action="answer_direct",
+                intent="meta",
+                direct_response=BOT_INTRO,
+            )
+
+        # ── Classifier tất định ───────────────────────────────────────────────
+        # Chạy TRƯỚC LLM. Nếu CHẮC CHẮN và intent không cần LLM dựng query
+        # (legal/consulting/calculate/validate/kg_query/web_search) → quyết định
+        # ngay, bỏ qua LLM (nhanh + nhất quán + tiết kiệm quota). Các intent cần
+        # rewrite/format (followup/compare/draft/chitchat...) vẫn để LLM lo.
+        has_doc = history_has_document(history)
+        if self.classifier is not None:
+            clf = self.classifier.classify(
+                question, has_document=has_doc, web_search_enabled=web_search_enabled,
+            )
+            if clf.confident and not clf.needs_llm_query:
+                logger.info(
+                    f"Router classifier ({clf.source}): intent={clf.intent} "
+                    f"action={clf.action} conf={clf.confidence:.2f} → bỏ qua LLM"
+                )
+                return self._decision_from_classifier(clf, question)
+
         self._connect()
 
         # ── Format history ────────────────────────────────────────────────────
@@ -253,7 +331,40 @@ class SmartRouter:
         if not data:
             return self._fallback(question, raw=raw)
 
-        return self._parse_decision(data, question, raw=raw)
+        decision = self._parse_decision(data, question, raw=raw)
+
+        # ── Guard cấu trúc: validate CHỈ khi có văn bản ───────────────────────
+        # Bug ~50%: câu dày trích dẫn formal bị LLM đẩy nhầm sang validate_document
+        # (bộ chấm thể thức lỗi) dù không có file. Không có target → ép về retrieve.
+        if decision.intent == "validate" and not has_validation_target(question, history):
+            logger.info("Router guard: LLM ra 'validate' nhưng KHÔNG có văn bản → ép retrieve")
+            return RouterDecision(
+                action="retrieve", intent="legal",
+                search_query=decision.search_query or question, raw=raw,
+            )
+
+        return decision
+
+    # ── Quyết định từ classifier ────────────────────────────────────────────────
+
+    def _decision_from_classifier(self, clf: Any, question: str) -> RouterDecision:
+        """Dựng RouterDecision tất định từ ClassifierResult (intent không cần LLM).
+
+        Chỉ gọi cho intent retrieve/use_tool đơn giản (search_query = tool_query =
+        câu hỏi gốc). compare/draft/followup/chitchat needs_llm_query=True nên
+        không bao giờ tới đây.
+        """
+        if clf.action == "use_tool":
+            return RouterDecision(
+                action="use_tool", intent=clf.intent,
+                search_query=question, tool_name=clf.tool_name,
+                tool_query=question, raw="classifier",
+            )
+        # retrieve (legal / consulting)
+        return RouterDecision(
+            action="retrieve", intent=clf.intent,
+            search_query=question, raw="classifier",
+        )
 
     # ── Parse ──────────────────────────────────────────────────────────────────
 
