@@ -12,28 +12,21 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Data — không commit dữ liệu thô và vector store
-data/raw/*
-!data/raw/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-data/vectorstore/*
-!data/vectorstore/.gitkeep
+# Data — không commit bất kỳ dữ liệu/artifact nào trong data/
+# (.gitkeep của raw/processed/vectorstore đã được track từ trước nên vẫn giữ)
+data/*
 
-# Generated / cache — rebuild trên server
-data/bm25/
-data/hf_cache/
-data/sessions/
-data/memory/
-data/memory.json
-data/data_report.json
-data/data_report_current.json
-data/comparison/
-data/exports/
-data/Bản án/
+# Module 2 NER — code + model nằm ở repo riêng HoangNhatTR/Legal-NER (~1GB weights)
+legal_ner/
+
+# Dữ liệu demo / bundle — không đưa vào git
+bản án demo/
+*.zip
 
 # Debug artifacts
 test_extract.json
+chained_transcript.md
+*.err
 
 # Models cache
 .cache/
