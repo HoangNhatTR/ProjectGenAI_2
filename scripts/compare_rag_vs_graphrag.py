@@ -107,7 +107,7 @@ def run_compare():
 
     # Load top 15 URLs for filter
     manifest = json.loads(
-        (config.DATA_DIR / "comparison" / "top10_laws" / "manifest.json").read_text(encoding="utf-8")
+        (config.DATA_DIR / "comparison" / "top15_laws" / "manifest.json").read_text(encoding="utf-8")
     )
     top15_urls = [l["source_url"] for l in manifest["laws"]]
 

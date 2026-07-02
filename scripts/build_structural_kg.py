@@ -42,10 +42,24 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Build Structural KG vào Neo4j")
     p.add_argument("--topic", default=None, help="Chỉ build 1 chủ đề")
     p.add_argument("--limit", type=int, default=None, help="Giới hạn N file (test)")
+    p.add_argument("--laws", default=None,
+                   help="Chỉ build các doc_number này (comma-separated). Bỏ qua file khác.")
+    p.add_argument("--top15", action="store_true",
+                   help="Chỉ build 15 luật trong DEFAULT_TOP_LAWS (benchmark graph, vừa Aura Free).")
     p.add_argument("--reset", action="store_true", help="Xoá KG cũ trước khi build")
     p.add_argument("--dry-run", action="store_true",
                    help="Chỉ extract, không write Neo4j (xem stats)")
     args = p.parse_args()
+
+    # Filter theo doc_number: --top15 dùng whitelist của semantic build (DRY), --laws tự nhập
+    laws_filter: set[str] | None = None
+    if args.top15:
+        from scripts.build_semantic_kg import DEFAULT_TOP_LAWS
+        laws_filter = set(DEFAULT_TOP_LAWS)
+    elif args.laws:
+        laws_filter = {s.strip() for s in args.laws.split(",") if s.strip()}
+    if laws_filter is not None:
+        print(f"Chỉ build {len(laws_filter)} luật (filter doc_number)")
 
     client = None
     if not args.dry_run:
@@ -96,6 +110,8 @@ def main() -> None:
     for i, (path, meta) in enumerate(iter_raw_files(config.RAW_DIR, topic_filter=args.topic)):
         if args.limit and i >= args.limit:
             break
+        if laws_filter is not None and meta.doc_number not in laws_filter:
+            continue
         try:
             doc = load_document(path, meta)
             result = extract_structural(doc)

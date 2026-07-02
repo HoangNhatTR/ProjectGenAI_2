@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .. import config
-from ..llm_client import GeminiClient, GroqClient, Router9Client
+from ..llm_client import GeminiClient, GroqClient, Router9Client, OpenRouterClient, KieAIClient
 
 
 # ─── Prompt ──────────────────────────────────────────────────────────────────
@@ -119,6 +119,21 @@ _DAILY_QUOTA_KEYWORDS = (
     "daily limit exceeded",
 )
 
+# Hết tiền / model trả phí / quota tháng — VĨNH VIỄN (không retry được), phải SWITCH
+# provider/model. 9Router trả các message này kèm HTTP 402; KieAI nhét code 402 vào body.
+_CREDIT_EXHAUSTED_KEYWORDS = (
+    "credits insufficient",
+    "insufficient credit",
+    "credits required",
+    "paid model",
+    "exceeded your monthly quota",
+    "monthly quota",
+    "insufficient_quota",
+    "out of credit",
+    "please top up",
+    "balance is",
+)
+
 _RATE_LIMIT_KEYWORDS = (
     "429",
     "rate limit",
@@ -137,6 +152,7 @@ _TRANSIENT_KEYWORDS = (
     "gateway timeout",
     "internal server error",
     "timeout",
+    "timed out",          # openai.APITimeoutError → "Request timed out."
     "connection error",
     "connection reset",
     "connection aborted",
@@ -188,9 +204,16 @@ def is_daily_quota_exhausted(error_msg: str, exc: Optional[Exception] = None) ->
     # Transient errors (5xx, timeout) không phải quota
     if any(kw in msg for kw in _TRANSIENT_KEYWORDS):
         return False
-    # HTTP 429 nhưng KHÔNG có daily-quota keyword → chỉ là per-minute throttle
+    # Hết tiền / paid model / quota tháng → treat như quota exhausted để SWITCH ngay
+    # (không retry được, sẽ lỗi mọi điều nếu không đổi provider/model).
+    if any(kw in msg for kw in _CREDIT_EXHAUSTED_KEYWORDS):
+        return True
     if exc is not None:
         status = _get_http_status(exc)
+        # HTTP 402 Payment Required → hết credit/paid, switch provider (KHÔNG retry)
+        if status == 402:
+            return True
+        # HTTP 429 nhưng KHÔNG có daily-quota keyword → chỉ là per-minute throttle
         if status == 429 and not any(kw in msg for kw in _DAILY_QUOTA_KEYWORDS):
             return False
     return any(kw in msg for kw in _DAILY_QUOTA_KEYWORDS)
@@ -222,6 +245,20 @@ def is_transient_error(error_msg: str, exc: Optional[Exception] = None) -> bool:
     return any(kw in msg for kw in _TRANSIENT_KEYWORDS)
 
 
+def _parse_reset_after_seconds(error_msg: str) -> Optional[int]:
+    """cx/Codex (9Router): 'usage limit has been reached (reset after 27m 33s)'.
+
+    Trả về tổng số giây cần chờ tới reset, hoặc None nếu không phải lỗi dạng này.
+    """
+    low = error_msg.lower()
+    if "usage limit" not in low or "reset after" not in low:
+        return None
+    m = re.search(r"reset after\s+(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?", low)
+    if not m or (m.group(1) is None and m.group(2) is None):
+        return None
+    return int(m.group(1) or 0) * 60 + int(m.group(2) or 0)
+
+
 # ─── Extractor ───────────────────────────────────────────────────────────────
 
 class SemanticExtractor:
@@ -236,7 +273,7 @@ class SemanticExtractor:
         model: Optional[str] = None,
         temperature: float = 0.1,
         max_text_chars: int = 8000,
-        max_retries: int = 4,
+        max_retries: int = 8,
     ):
         self.provider = provider.lower()
         self.temperature = temperature
@@ -276,6 +313,23 @@ class SemanticExtractor:
             self._client = Router9Client(api_key=api_key, base_url=base_url)
             # Default: free Claude Sonnet 4.5 qua Kiro AI (quality cao)
             self.model = model or os.getenv("ROUTER9_MODEL", "kr/claude-sonnet-4.5")
+        elif self.provider == "openrouter":
+            # GPT qua OpenRouter (user yêu cầu thay Claude). 9Router GPT đều 402.
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if not api_key:
+                raise RuntimeError("OPENROUTER_API_KEY chưa được set trong .env")
+            base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            self._client = OpenRouterClient(api_key=api_key, base_url=base_url)
+            # gpt-4o-mini: rẻ + hỗ trợ json_object. Đổi qua OPENROUTER_SEMANTIC_MODEL nếu muốn.
+            self.model = model or os.getenv("OPENROUTER_SEMANTIC_MODEL", "openai/gpt-4o-mini")
+        elif self.provider == "kieai":
+            # KieAI (kieai.erweima.ai) — deepseek-chat, non-Claude, free/rẻ.
+            api_key = os.getenv("KIEAI_API_KEY")
+            if not api_key:
+                raise RuntimeError("KIEAI_API_KEY chưa được set trong .env")
+            base_url = os.getenv("KIEAI_BASE_URL", "https://kieai.erweima.ai/api/v1")
+            self._client = KieAIClient(api_key=api_key, base_url=base_url)
+            self.model = model or os.getenv("KIEAI_SEMANTIC_MODEL", "deepseek-chat")
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -289,6 +343,7 @@ class SemanticExtractor:
           - Lỗi khác (validation, parse...) → raise sớm
         """
         last_exc: Optional[Exception] = None
+        usage_waits = 0  # số lần đã chờ "usage limit reset" (cx/Codex window ~25 phút)
         for attempt in range(self.max_retries):
             try:
                 response = self._client.chat(
@@ -306,10 +361,21 @@ class SemanticExtractor:
                 if is_daily_quota_exhausted(msg, exc=exc):
                     raise
 
+                # cx/Codex "usage limit reached (reset after Xm Ys)" → chờ tới reset
+                # rồi retry (backoff thường cap 90s không đủ cho window ~25 phút).
+                reset_s = _parse_reset_after_seconds(msg)
+                if reset_s is not None:
+                    if reset_s <= 1900 and usage_waits < 2:
+                        usage_waits += 1
+                        print(f"          ⏳ cx usage-limit, chờ {reset_s}s tới reset...", flush=True)
+                        time.sleep(reset_s + 5)
+                        continue
+                    raise  # chờ quá lâu / đã chờ 2 lần → bỏ, --skip-existing resume sau
+
                 # Rate limit hoặc transient (5xx/timeout/conn) → backoff retry
                 if is_rate_limited(msg, exc=exc) or is_transient_error(msg, exc=exc):
                     backoff = (2 ** attempt) + random.uniform(0, 1)
-                    time.sleep(min(backoff, 30))
+                    time.sleep(min(backoff, 90))
                     continue
 
                 # Lỗi khác (validation, parse...) → raise sớm
@@ -325,10 +391,17 @@ class SemanticExtractor:
             raw = self._call_with_retry(prompt)
         except Exception as exc:
             err_msg = str(exc)
+            # _call_with_retry đã backoff 8 lần. Nếu VẪN daily-quota/credit HOẶC rate-limit
+            # (429) → switch provider/model kế trong chain thay vì fail từng điều mãi. 429
+            # dai dẳng = trần rate bị siết chặt (vd Antigravity free), đổi model là đúng.
+            should_switch = (
+                is_daily_quota_exhausted(err_msg, exc=exc)
+                or is_rate_limited(err_msg, exc=exc)
+            )
             return SemanticExtraction(
                 article_id=article_id,
                 error=f"LLM call failed: {err_msg}",
-                quota_exhausted=is_daily_quota_exhausted(err_msg, exc=exc),
+                quota_exhausted=should_switch,
             )
 
         # Parse JSON (đôi khi LLM wrap markdown)

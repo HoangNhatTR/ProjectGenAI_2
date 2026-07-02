@@ -70,7 +70,9 @@ DELAYS = {
     "gemini":  4.1,
     "groq":    10.0,
     "groq-8b": 7.5,
-    "router9": 4.0,   # 15 RPM safe cho cả Claude Code lẫn GitHub Copilot
+    "router9": 10.0,  # 6 RPM — 4s từng gây 429 (mỗi call ~2K token system-prompt của 9Router)
+    "openrouter": 4.0,  # GPT (gpt-4o-mini) qua OpenRouter — free-tier ~15-20 RPM
+    "kieai": 5.0,       # KieAI deepseek-chat — 3s từng bị rate-limit (choices=None ~60%)
 }
 
 
@@ -97,16 +99,29 @@ def main() -> None:
                         "(default: 'gemini,groq')")
     p.add_argument("--skip-existing", action="store_true",
                    help="Skip Article đã có ít nhất 1 edge PENALIZES/IMPOSES/APPLIES_TO")
+    p.add_argument("--delay", type=float, default=None,
+                   help="Override throttle giây/điều (mặc định theo provider trong DELAYS).")
     args = p.parse_args()
 
     laws_list = (
         [s.strip() for s in args.laws.split(",")] if args.laws
         else DEFAULT_TOP_LAWS
     )
+    # Mỗi entry: "groq" (provider mặc định model) HOẶC "router9:ag/gemini-3-flash-agent"
+    # (provider:model — xoay vòng nhiều model 9Router). Split ":" đầu tiên nếu vế trái là
+    # provider hợp lệ; model name có thể chứa ":" (vd ollama/gpt-oss:120b) nên chỉ split 1 lần.
+    def _split_entry(entry: str) -> tuple[str, Optional[str]]:
+        if ":" in entry:
+            base, model = entry.split(":", 1)
+            if base in DELAYS:
+                return base, model
+        return entry, None
+
     providers_chain = [p.strip() for p in args.provider.split(",") if p.strip()]
-    for p_name in providers_chain:
-        if p_name not in DELAYS:
-            print(f"⚠ Unknown provider '{p_name}', valid: {list(DELAYS.keys())}")
+    chain = [_split_entry(e) for e in providers_chain]
+    for base, _model in chain:
+        if base not in DELAYS:
+            print(f"⚠ Unknown provider '{base}', valid: {list(DELAYS.keys())}")
             sys.exit(1)
 
     print(f"Phase 1 — Semantic KG extraction")
@@ -121,12 +136,13 @@ def main() -> None:
     current_provider_idx = 0
 
     def get_extractor():
-        """Lấy extractor hiện tại theo current_provider_idx."""
-        p_name = providers_chain[current_provider_idx]
-        if p_name not in extractors_cache:
-            extractors_cache[p_name] = SemanticExtractor(provider=p_name)
-            print(f"  ⚡ Khởi tạo provider: {p_name} (model: {extractors_cache[p_name].model})")
-        return extractors_cache[p_name], p_name, DELAYS[p_name]
+        """Lấy extractor hiện tại theo current_provider_idx (key = full entry string)."""
+        key = providers_chain[current_provider_idx]
+        base, model = chain[current_provider_idx]
+        if key not in extractors_cache:
+            extractors_cache[key] = SemanticExtractor(provider=base, model=model)
+            print(f"  ⚡ Khởi tạo provider: {key} (model: {extractors_cache[key].model})")
+        return extractors_cache[key], key, (args.delay if args.delay else DELAYS[base])
 
     # Khởi tạo provider đầu tiên ngay để fail-fast nếu API key sai
     _ = get_extractor()
@@ -143,8 +159,7 @@ def main() -> None:
         with client.session() as s:
             rows = s.run("""
                 MATCH (a:Article)
-                WHERE EXISTS { MATCH (a)-[:HAS_CLAUSE]->(:Clause)-[:PENALIZES|IMPOSES]->() }
-                   OR EXISTS { MATCH (a)-[:PENALIZES|IMPOSES]->() }
+                WHERE a.semantic_done IS NOT NULL
                 RETURN a.id AS id
             """).data()
             existing_articles = {r["id"] for r in rows}
@@ -252,6 +267,13 @@ def main() -> None:
                         )
                     except Exception as exc:
                         print(f"          ⚠ Lỗi write Neo4j: {exc}")
+
+                # Đánh dấu đã xử lý (kể cả rỗng) để resume bỏ qua, tránh làm lại
+                if not args.dry_run:
+                    try:
+                        client.mark_article_done(art_id)
+                    except Exception:
+                        pass
 
             if args.save_raw:
                 raw_extractions.append({

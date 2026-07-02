@@ -152,6 +152,18 @@ class Neo4jClient:
 
     # ─── Phase 1: Semantic entities ──────────────────────────────────────────
 
+    def mark_article_done(self, article_id: str) -> None:
+        """Đánh dấu Article đã semantic-extract (KỂ CẢ rỗng) → --skip-existing bỏ qua.
+
+        Tránh re-process điều rỗng/chỉ-Subject (không có edge PENALIZES/IMPOSES nên
+        query skip cũ không nhận ra) mỗi lần resume.
+        """
+        with self.session() as s:
+            s.run(
+                "MATCH (a:Article {id: $id}) SET a.semantic_done = true",
+                id=article_id,
+            )
+
     def write_semantic_extraction(
         self,
         article_id: str,

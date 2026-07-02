@@ -1,6 +1,7 @@
 """Unit tests cho RRF fusion — thuật toán xếp hạng cốt lõi của Retriever."""
 from __future__ import annotations
 
+import src.retriever as retriever_mod
 from src.retriever import Retriever
 from src.schemas import Chunk, DocumentMetadata, RetrievedChunk
 
@@ -48,8 +49,28 @@ def test_rrf_top_k_gioi_han_ket_qua():
     assert [x.chunk.chunk_id for x in results] == ["c0", "c1", "c2", "c3"]
 
 
-def test_rrf_kg_weight_boost():
-    """KG branch có weight 1.5 → chunk KG rank 0 thắng chunk vector rank 0."""
+def test_rrf_kg_weight_mac_dinh_ngang_vector():
+    """KG_WEIGHT mặc định 1.0 → KG branch ngang hàng vector, KHÔNG boost.
+
+    (Đo thật cho thấy boost 1.5 đẩy KG noise lên top ở câu hỏi tình huống —
+    xem comment tại src/retriever.py cạnh KG_WEIGHT.)
+    """
+    r = _retriever()
+    kg_c = _chunk("kg")
+    vec_c = _chunk("vec")
+    results = r._rrf_fuse(
+        bm25_results=[],
+        vector_results=[RetrievedChunk(chunk=vec_c, score=0.99)],
+        kg_chunks=[kg_c],
+        top_k=2,
+    )
+    by_id = {x.chunk.chunk_id: x.score for x in results}
+    assert abs(by_id["kg"] - by_id["vec"]) < 1e-9
+
+
+def test_rrf_kg_weight_boost_khi_override(monkeypatch):
+    """Cơ chế KG_WEIGHT > 1 vẫn hoạt động: chunk KG rank 0 thắng vector rank 0."""
+    monkeypatch.setattr(retriever_mod, "KG_WEIGHT", 1.5)
     r = _retriever()
     kg_c = _chunk("kg")
     vec_c = _chunk("vec")
