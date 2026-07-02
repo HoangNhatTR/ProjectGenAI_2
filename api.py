@@ -285,6 +285,11 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = None           # số chunk retrieve (mặc định config.TOP_K)
     ce_threshold: Optional[float] = None  # ngưỡng CrossEncoder skip (mặc định 0.04)
     llm_model: Optional[str] = None       # override LLM model (router9/kieai)
+    # Máy gọi máy (Module 2 /analyze...): bỏ router+planner, RAG trực tiếp —
+    # tất định, không bao giờ rơi nhầm sang validate_document/chitchat.
+    # search_query: truy vấn retrieve riêng (gọn, đích danh) khi prompt dài.
+    skip_router: bool = False
+    search_query: Optional[str] = None
 
 
 class OAIDelta(BaseModel):
@@ -431,6 +436,56 @@ async def embed(req: EmbedRequest, authorization: Optional[str] = Header(None)):
     return {"vectors": vectors}
 
 
+class RetrieveRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    model: str = "legal-ai-graph"  # map sang RAG mode như /v1/chat/completions
+
+
+@app.post("/v1/retrieve")
+async def retrieve_only(req: RetrieveRequest, authorization: Optional[str] = Header(None)):
+    """Retrieve + rerank THUẦN (không generate) — trả metadata chunks.
+
+    Dùng cho: Module 2 kiểm chứng viện dẫn trên kho luật lớn (corpus_check),
+    debug ranking, hoặc bất kỳ client nào chỉ cần nguồn không cần câu trả lời.
+    Đi qua cùng _retrieve_rerank với chat (cache chung, phễu CE chung).
+    """
+    _require_auth(authorization)
+    pipeline: LegalPipeline = _agent.get("pipeline")
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+    if not req.query.strip():
+        return {"query": req.query, "chunks": []}
+
+    rag_mode = MODEL_TO_MODE.get(req.model, "graph_rag")
+    mode_cfg = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
+    contexts = await asyncio.get_event_loop().run_in_executor(
+        None,
+        functools.partial(
+            pipeline._retrieve_rerank,
+            req.query, rag_mode, max(1, min(req.top_k, 20)),
+            mode_cfg["use_kg"],
+            pipeline.top15_urls if mode_cfg["use_top10_filter"] else None,
+            0.04,
+        ),
+    )
+    return {
+        "query": req.query,
+        "chunks": [
+            {
+                "score": round(r.score, 4),
+                "article": r.chunk.article,
+                "clause": r.chunk.clause,
+                "doc_number": r.chunk.metadata.doc_number,
+                "title": r.chunk.metadata.title,
+                "source": r.chunk.metadata.source,
+                "snippet": (r.chunk.text or "")[:300],
+            }
+            for r in contexts
+        ],
+    }
+
+
 # Đường dẫn tuyệt đối theo config — không phụ thuộc CWD lúc chạy uvicorn
 _EXPORT_DIR = config.DATA_DIR / "exports"
 
@@ -492,6 +547,8 @@ async def chat_completions(
                 top_p=_top_p,
                 ce_threshold=_ce_thresh,
                 llm_model=_llm_model,
+                skip_router=request.skip_router,
+                search_query=request.search_query,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -503,6 +560,7 @@ async def chat_completions(
                 _run_pipeline, user_input, history, rag_mode,
                 _top_k, request.web_search,
                 _temperature, _top_p, _ce_thresh, _llm_model,
+                request.skip_router, request.search_query,
             ),
         )
         full_text = _format_answer(answer)
@@ -529,6 +587,8 @@ def _run_pipeline(
     top_p: Optional[float] = None,
     ce_threshold: float = 0.04,
     llm_model: Optional[str] = None,
+    skip_router: bool = False,
+    search_query: Optional[str] = None,
 ) -> Answer:
     """Wrapper mỏng quanh LegalPipeline.run (logic chung ở src/pipeline.py)."""
     return _agent["pipeline"].run(
@@ -536,6 +596,7 @@ def _run_pipeline(
         top_k=top_k, web_search_enabled=web_search_enabled,
         temperature=temperature, top_p=top_p,
         ce_threshold=ce_threshold, llm_model=llm_model,
+        skip_router=skip_router, search_query=search_query,
     )
 
 
@@ -610,6 +671,8 @@ async def _stream_pipeline(
     top_p: Optional[float] = None,
     ce_threshold: float = 0.04,
     llm_model: Optional[str] = None,
+    skip_router: bool = False,
+    search_query: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """Generator SSE — retrieve trong thread pool, sau đó stream THẬT từ LLM.
 
@@ -658,6 +721,7 @@ async def _stream_pipeline(
             functools.partial(
                 pipeline.prepare, user_input, history, rag_mode,
                 top_k, web_search_enabled, ce_threshold,
+                skip_router=skip_router, search_query=search_query,
             ),
         )
     except Exception as e:

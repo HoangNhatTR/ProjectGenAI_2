@@ -276,8 +276,20 @@ class LegalPipeline:
         web_search_enabled: bool = True,
         ce_threshold: float = 0.04,
         use_planner: bool = True,
+        skip_router: bool = False,
+        search_query: Optional[str] = None,
     ) -> PipelinePrep:
-        """Router → tool → (planner) → retrieve → rerank (synchronous, chưa generate)."""
+        """Router → tool → (planner) → retrieve → rerank (synchronous, chưa generate).
+
+        skip_router=True: máy gọi máy (vd Module 2 /analyze) — đi thẳng Flow C
+        RAG, không router (LLM bất định), không planner, không tool. Trước đây
+        Module 2 phải "giả giọng người" + guard + retry 3 lần vì router thỉnh
+        thoảng đẩy nhầm sang validate_document.
+
+        search_query (chỉ dùng với skip_router): truy vấn RETRIEVE riêng —
+        caller máy biết chính xác cần tìm gì (vd "khung hình phạt điểm c khoản 1
+        Điều 250"), còn prompt generate có thể dài đầy hướng dẫn.
+        """
         mode_cfg = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
         use_kg = mode_cfg["use_kg"]
         allowed_sources = self.top15_urls if mode_cfg["use_top10_filter"] else None
@@ -292,6 +304,32 @@ class LegalPipeline:
         conv_state.update_from_question(user_input)
 
         llm_history = history[-MAX_HISTORY:]
+
+        # ── Đường tắt cho machine call: RAG trực tiếp, tất định ─────────────
+        if skip_router:
+            _sq = (search_query or "").strip() or user_input
+            logger.info(f"skip_router=True → Flow C trực tiếp (search='{_sq[:60]}')")
+            contexts = self._retrieve_rerank(
+                _sq, rag_mode, top_k, use_kg, allowed_sources, ce_threshold,
+            )
+            if not contexts:
+                ans = Answer(
+                    question=user_input,
+                    answer=(
+                        "Không tìm thấy căn cứ pháp lý trong cơ sở dữ liệu. "
+                        "Vui lòng thử câu hỏi khác hoặc tham khảo ý kiến luật sư."
+                    ),
+                    citations=[],
+                )
+                return PipelinePrep(
+                    final_answer=apply_guardrails(ans, []),
+                    llm_history=llm_history,
+                )
+            return PipelinePrep(
+                contexts=contexts,
+                state_context=conv_state.to_context_string(),
+                llm_history=llm_history,
+            )
 
         # ── Router ───────────────────────────────────────────────────────────
         _t0 = time.time()
@@ -498,13 +536,15 @@ class LegalPipeline:
         ce_threshold: float = 0.04,
         llm_model: Optional[str] = None,
         use_planner: bool = True,
+        skip_router: bool = False,
+        search_query: Optional[str] = None,
     ) -> Answer:
         """Chạy toàn bộ pipeline (synchronous, non-streaming). Trả về Answer."""
         _t_total = time.time()
 
         prep = self.prepare(
             user_input, history, rag_mode, top_k, web_search_enabled, ce_threshold,
-            use_planner=use_planner,
+            use_planner=use_planner, skip_router=skip_router, search_query=search_query,
         )
         if prep.final_answer is not None:
             logger.info(f"TOTAL {time.time()-_t_total:.2f}s (không cần generate)")
