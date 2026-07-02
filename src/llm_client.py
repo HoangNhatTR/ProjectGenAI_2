@@ -12,6 +12,18 @@ from __future__ import annotations
 from typing import Any, Optional
 
 
+def _is_transient(exc: Exception) -> bool:
+    """Lỗi tạm thời (đáng retry): rate limit, quá tải, timeout, 5xx."""
+    msg = str(exc).lower()
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status in (408, 409, 429, 500, 502, 503, 504):
+        return True
+    keys = ("rate limit", "overload", "timeout", "timed out", "temporarily",
+            "too many requests", "empty response", "choices=none", "503", "502",
+            "500", "429", "connection", "unavailable")
+    return any(k in msg for k in keys)
+
+
 def create_client(
     provider: str,
     api_key: str = "",
@@ -123,7 +135,10 @@ class GroqClient:
 
     def __init__(self, api_key: str):
         from groq import Groq
-        self._client = Groq(api_key=api_key)
+        # timeout + max_retries: tránh treo VÔ HẠN khi máy ngủ / rớt mạng giữa call
+        # (trước đây thiếu → process sống mà CPU=0, đứng im hàng giờ). APITimeoutError
+        # → _call_with_retry coi là transient → backoff retry, giống Router9/KieAI client.
+        self._client = Groq(api_key=api_key, timeout=90.0, max_retries=0)
 
     def chat(
         self,
@@ -193,7 +208,7 @@ class OpenRouterClient:
         }
         if format == "json":
             kwargs["response_format"] = {"type": "json_object"}
-            kwargs["max_tokens"] = int(options.get("max_tokens", 512))
+            kwargs["max_tokens"] = int(options.get("max_tokens", 2048))
         elif "max_tokens" in options:
             kwargs["max_tokens"] = int(options["max_tokens"])
 
@@ -253,7 +268,9 @@ class Router9Client:
             raise ImportError(
                 "Cần cài 'openai' package: pip install openai>=1.30.0"
             ) from e
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # timeout=90s: tránh treo vô hạn khi mất kết nối (vd máy ngủ) — sẽ raise
+        # APITimeoutError → _call_with_retry coi là transient → backoff retry.
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=90.0)
 
     def chat(
         self,
@@ -312,21 +329,58 @@ class Router9Client:
 
 
 class KieAIClient:
-    """Wrapper cho Kie AI (kieai.erweima.ai) — OpenAI-compatible API.
+    """Wrapper cho Kie AI — OpenAI-compatible API. Hỗ trợ 2 kiểu base URL:
 
-    Base URL: https://kieai.erweima.ai/api/v1
-    Đã xác nhận hoạt động: deepseek-chat (→ deepseek-v4-flash)
-    Xem thêm model tại: https://kie.ai/market
+    1. Gateway gộp chung (cũ): https://kieai.erweima.ai/api/v1 — 1 endpoint cho
+       mọi model, nhưng thực tế CHỈ nhận deepseek-chat (model khác → "Operation
+       not found"); endpoint này hay bảo trì.
+    2. Endpoint CHÍNH THỨC theo TỪNG MODEL: https://api.kie.ai/{model}/v1 — mỗi
+       model 1 base URL riêng (slug nằm trong path). Đã xác nhận chạy với key
+       thật: gemini-3-pro, gemini-3-flash, gpt-5-2 (xác minh 2026-06-22).
+       Slug = tên trên URL trang model (kie.ai/gemini-3-pro → "gemini-3-pro").
+
+    Nếu base_url chứa placeholder "{model}" → tự dựng URL theo model + cache 1
+    client/model. Ngược lại → 1 client duy nhất (tương thích gateway cũ).
+    Xem danh mục: https://docs.kie.ai/market/chat
     """
 
     BASE_URL = "https://kieai.erweima.ai/api/v1"
+    _MAX_RETRIES = 4  # tổng số lần thử khi KieAI trả rỗng/nghẽn (1 lần đầu + 3 retry)
 
     def __init__(self, api_key: str, base_url: str = BASE_URL):
         try:
             from openai import OpenAI
         except ImportError as e:
             raise ImportError("Cần cài 'openai' package: pip install openai>=1.30.0") from e
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._api_key  = api_key
+        self._base_url = base_url
+        self._OpenAI   = OpenAI
+        # WAF api.kie.ai CHẶN User-Agent mặc định của OpenAI SDK ("OpenAI/Python…")
+        # → 403 "Your request was blocked." (xác minh 2026-06-22). Ghi đè UA trung
+        # tính để qua. Các header X-Stainless-* không bị chặn.
+        self._headers = {"User-Agent": "kie-legalai/1.0"}
+        # base_url có "{model}" → endpoint chính thức theo từng model (cache riêng).
+        self._per_model: bool = "{model}" in base_url
+        self._clients: dict[str, Any] = {}
+        if not self._per_model:
+            # timeout=90s: tránh treo vô hạn khi mất kết nối (giống Router9Client).
+            self._clients[""] = OpenAI(
+                api_key=api_key, base_url=base_url, timeout=90.0,
+                default_headers=self._headers,
+            )
+
+    def _client_for(self, model: str):
+        """Trả client OpenAI cho model — dựng base_url theo model nếu cần."""
+        cache_key = model if self._per_model else ""
+        client = self._clients.get(cache_key)
+        if client is None:
+            url = self._base_url.format(model=model) if self._per_model else self._base_url
+            client = self._OpenAI(
+                api_key=self._api_key, base_url=url, timeout=90.0,
+                default_headers=self._headers,
+            )
+            self._clients[cache_key] = client
+        return client
 
     def chat(
         self,
@@ -338,6 +392,7 @@ class KieAIClient:
         options     = options or {}
         temperature = float(options.get("temperature", 0.2))
         top_p       = float(options.get("top_p", 1.0))
+        client      = self._client_for(model)
         kwargs: dict[str, Any] = {
             "model":       model,
             "messages":    messages,
@@ -347,15 +402,33 @@ class KieAIClient:
         }
         if format == "json":
             kwargs["response_format"] = {"type": "json_object"}
-        try:
-            response = self._client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            if "response_format" in kwargs and "json_object" in str(exc).lower():
-                kwargs.pop("response_format", None)
-                response = self._client.chat.completions.create(**kwargs)
+
+        # KieAI đôi khi trả HTTP 200 với choices=None khi bị rate limit / quá tải
+        # (đặc biệt với prompt RAG dài). Retry + backoff để tự phục hồi thay vì
+        # ném lỗi cho người dùng. Mỗi lần thử là 1 request mới (không stream).
+        import time as _time
+        import random as _random
+        last_err: Optional[Exception] = None
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if "response_format" in kwargs and "json_object" in str(exc).lower():
+                    # model không hỗ trợ json_object → bỏ rồi thử lại NGAY (không tính lượt)
+                    kwargs.pop("response_format", None)
+                    continue
+                if not _is_transient(exc) or attempt == self._MAX_RETRIES - 1:
+                    raise
+                last_err = exc
             else:
-                raise
-        return {"message": {"content": response.choices[0].message.content or ""}}
+                if response and response.choices:
+                    return {"message": {"content": response.choices[0].message.content or ""}}
+                last_err = RuntimeError(
+                    "KieAI empty response (choices=None) — rate limit / overload"
+                )
+            # backoff: 1.5s, 3s, 6s (+ jitter) — đủ để KieAI hạ tải qua cơn nghẽn
+            _time.sleep(min(1.5 * (2 ** attempt), 12.0) + _random.uniform(0, 0.5))
+        raise last_err or RuntimeError("KieAI empty response (choices=None) — rate limit / overload")
 
     def stream_chat(
         self,
@@ -366,6 +439,7 @@ class KieAIClient:
         options     = options or {}
         temperature = float(options.get("temperature", 0.2))
         top_p       = float(options.get("top_p", 1.0))
+        client      = self._client_for(model)
         kwargs: dict[str, Any] = {
             "model":       model,
             "messages":    messages,
@@ -373,7 +447,30 @@ class KieAIClient:
             "top_p":       top_p,
             "stream":      True,
         }
-        for chunk in self._client.chat.completions.create(**kwargs):
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                yield delta
+        import time as _time
+        import random as _random
+        # Retry CHỈ khi chưa phát ký tự nào (an toàn — không lặp nội dung). Nếu
+        # KieAI nghẽn trả stream rỗng / lỗi giữa lúc thiết lập → thử lại; đã phát
+        # chữ rồi mà đứt thì raise (không thể tua lại stream).
+        last_err: Optional[Exception] = None
+        for attempt in range(self._MAX_RETRIES):
+            emitted = False
+            try:
+                for chunk in client.chat.completions.create(**kwargs):
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        emitted = True
+                        yield delta
+            except Exception as exc:
+                if emitted or not _is_transient(exc) or attempt == self._MAX_RETRIES - 1:
+                    raise
+                last_err = exc
+            else:
+                if emitted:
+                    return
+                last_err = RuntimeError(
+                    "KieAI empty stream (choices=None) — rate limit / overload"
+                )
+            _time.sleep(min(1.5 * (2 ** attempt), 12.0) + _random.uniform(0, 0.5))
+        if last_err:
+            raise last_err

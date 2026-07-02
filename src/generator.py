@@ -328,6 +328,25 @@ class Generator:
             full_text += chunk
             yield chunk
 
+        # Lưới an toàn: một số provider (vd KieAI) trả SSE nhưng KHÔNG phát
+        # content delta → stream rỗng dù model vẫn trả lời được ở non-stream.
+        # Khi đó fallback non-streaming để KHÔNG trả về câu trả lời trống
+        # (UI chỉ còn disclaimer + citations).
+        if not full_text.strip():
+            logger.warning(
+                f"Stream rỗng (model={self.model}, provider="
+                f"{getattr(self, 'provider', '?')}) → fallback non-streaming"
+            )
+            answer = self.generate(
+                question, contexts, history=history,
+                memory_text=memory_text, summary_text=summary_text,
+                tool_results=tool_results, state_context=state_context,
+            )
+            self._last_stream_answer = answer
+            if answer.answer:
+                yield answer.answer
+            return
+
         # Lọc citations từ answer đã stream xong
         cited_indices = _extract_cited_indices(full_text, len(contexts))
         cited_contexts = [contexts[i] for i in cited_indices] if cited_indices else contexts

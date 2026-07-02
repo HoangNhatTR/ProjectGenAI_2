@@ -35,7 +35,10 @@ ROUTER9_API_KEY      = os.getenv("ROUTER9_API_KEY", "")
 ROUTER9_BASE_URL     = os.getenv("ROUTER9_BASE_URL", "http://localhost:20128/v1")
 ROUTER9_MODEL        = os.getenv("ROUTER9_MODEL", "cc/claude-haiku-4-5-20251001")
 KIEAI_API_KEY        = os.getenv("KIEAI_API_KEY", "")
-KIEAI_BASE_URL       = os.getenv("KIEAI_BASE_URL", "https://kieai.erweima.ai/api/v1")
+# Mặc định endpoint CHÍNH THỨC theo từng model (placeholder {model} sẽ được
+# KieAIClient thay bằng slug). Gateway cũ gộp chung (chỉ deepseek-chat, hay bảo
+# trì): đặt KIEAI_BASE_URL=https://kieai.erweima.ai/api/v1 trong .env để quay lại.
+KIEAI_BASE_URL       = os.getenv("KIEAI_BASE_URL", "https://api.kie.ai/{model}/v1")
 OPENROUTER_API_KEY   = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL  = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
@@ -97,14 +100,19 @@ ROUTER9_MODEL_IDS: list[str] = [m[0] for m in ROUTER9_MODELS]
 # Mỗi entry: (model_id, label, provider_key)
 # Confirmed working: deepseek-chat → deepseek-v4-flash
 # Xem thêm tại: https://kie.ai/market
+# Endpoint chính thức api.kie.ai/{slug}/v1/chat/completions (OpenAI-compatible).
+# CHỈ liệt kê slug ĐÃ XÁC MINH chạy với key thật (2026-06-22). LƯU Ý slug: bản
+# 2.5/3.1 dùng DẤU CHẤM (gemini-2.5-pro), bản "3" dùng gạch (gemini-3-pro);
+# Gemini 3.5 Flash phải dùng slug "gemini-3-5-flash-openai".
+# Claude (×8) đi endpoint Anthropic /claude/v1/messages, GPT-5.4/5.5 + Codex đi
+# Responses API /v1/responses — KHÔNG dùng được qua client OpenAI hiện tại.
 KIEAI_MODELS: list[tuple[str, str]] = [
-    ("deepseek-chat",    "DeepSeek Chat  (→ v4-flash) ✓"),
-    ("deepseek-r1",      "DeepSeek R1    (reasoning)"),
-    ("gpt-4o",           "GPT-4o"),
-    ("gpt-4o-mini",      "GPT-4o mini    — nhanh"),
-    ("claude-sonnet",    "Claude Sonnet"),
-    ("claude-haiku",     "Claude Haiku   — nhanh"),
-    ("gemini-2.0-flash", "Gemini 2.0 Flash"),
-    ("gemini-2.5-pro",   "Gemini 2.5 Pro"),
+    ("gemini-3-pro",            "Gemini 3 Pro     (mạnh nhất)"),
+    ("gemini-3.1-pro",          "Gemini 3.1 Pro"),
+    ("gemini-2.5-pro",          "Gemini 2.5 Pro"),
+    ("gpt-5-2",                 "GPT-5.2          (đa phương thức)"),
+    ("gemini-3-flash",          "Gemini 3 Flash   (nhanh/rẻ)"),
+    ("gemini-3-5-flash-openai", "Gemini 3.5 Flash (nhanh)"),
+    ("gemini-2.5-flash",        "Gemini 2.5 Flash (nhanh)"),
 ]
 KIEAI_MODEL_IDS: list[str] = [m[0] for m in KIEAI_MODELS]
