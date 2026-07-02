@@ -40,6 +40,25 @@ VBHN_FACTOR          = 1.05   # Văn bản hợp nhất (đã gộp sửa đổi
 
 _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
+# ── Fine-intent boost — câu hỏi mức phạt HÀNH CHÍNH → ưu tiên NĐ xử phạt ───────
+# Quan sát đã đo (eval GT): câu 'phạt bao nhiêu' hay lôi chunk THÔNG SỐ KỸ THUẬT
+# (Thông tư quản lý đèn tín hiệu) lên trên chunk XỬ PHẠT của nghị định.
+# Chỉ BOOST nghị định xử phạt, KHÔNG demote ai — an toàn cho nhóm khác.
+# Câu hình sự (phạt tù, mức án) KHÔNG boost — đáp án nằm ở Bộ luật Hình sự.
+# Tắt: FINE_INTENT_BOOST=1.0
+FINE_INTENT_BOOST = float(os.getenv("FINE_INTENT_BOOST", "1.15"))
+_FINE_QUERY_RE = re.compile(
+    r"phạt tiền|mức phạt|xử phạt|phạt bao nhiêu|bị phạt|tiền phạt|phạt hành chính"
+)
+_CRIMINAL_HINT_RE = re.compile(
+    r"phạt tù|đi tù|tù giam|hình sự|mức án|án phạt|khung hình phạt|truy cứu|tội"
+)
+
+# ── Per-doc cap — chống 'số đông chunk' trong pool ứng viên ────────────────────
+# VB đồ sộ (03/VBHN-BGTVT 6.983 chunk) lấp kín pool bằng nhiều chunk trung bình
+# → chunk đúng của VB khác (NĐ 168) không còn slot cho CE thấy. Tắt: PER_DOC_CAP=0
+PER_DOC_CAP = int(os.getenv("PER_DOC_CAP", "3"))
+
 _ARTICLE_PATTERNS = [
     r'(?:Điều|điều)\s+\d+',
     r'(?:Khoản|khoản)\s+\d+',
@@ -161,6 +180,47 @@ def _temporal_factor(chunk) -> float:
     return factor
 
 
+def _is_fine_intent(query_lower: str) -> bool:
+    """True khi câu hỏi về mức phạt HÀNH CHÍNH (không phải hình sự)."""
+    return bool(
+        _FINE_QUERY_RE.search(query_lower)
+        and not _CRIMINAL_HINT_RE.search(query_lower)
+    )
+
+
+def _fine_intent_factor(chunk) -> float:
+    """Boost chunk nghị định xử phạt khi query là fine-intent. Còn lại 1.0."""
+    meta = chunk.metadata
+    if "nghị định" not in (meta.doc_type or "").lower():
+        return 1.0
+    # Tiêu đề VB hoặc contextual header/tiêu đề Điều (đầu chunk) chứa "xử phạt"
+    hay = ((meta.title or "") + " " + (chunk.text or "")[:160]).lower()
+    return FINE_INTENT_BOOST if "xử phạt" in hay else 1.0
+
+
+def cap_per_doc(
+    chunks: list[RetrievedChunk], cap: int = None,  # type: ignore[assignment]
+) -> list[RetrievedChunk]:
+    """Giới hạn tối đa `cap` chunk/văn bản trong pool ứng viên (giữ thứ tự rank).
+
+    Gọi TRƯỚC rerank để pool CE thấy nhiều văn bản khác nhau thay vì
+    20 chunk của cùng một Thông tư cũ. cap<=0 → tắt.
+    """
+    if cap is None:
+        cap = PER_DOC_CAP
+    if cap <= 0:
+        return chunks
+    counts: dict[str, int] = {}
+    out: list[RetrievedChunk] = []
+    for r in chunks:
+        src = r.chunk.metadata.source or ""
+        if counts.get(src, 0) >= cap:
+            continue
+        counts[src] = counts.get(src, 0) + 1
+        out.append(r)
+    return out
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def rerank(
@@ -187,6 +247,7 @@ def rerank(
 
     query_lower = query.lower()
     query_refs  = _extract_refs(query)
+    fine_intent = _is_fine_intent(query_lower)
 
     ce = _get_cross_encoder() if use_cross_encoder else None
 
@@ -200,7 +261,8 @@ def rerank(
                 ce_score   = _sigmoid(logit)
                 rule_b     = _rule_boost(query_lower, query_refs, r.chunk)
                 temporal   = _temporal_factor(r.chunk)
-                final      = min(SCORE_CAP, (ce_score + rule_b * RULE_ALPHA) * temporal)
+                fine_f     = _fine_intent_factor(r.chunk) if fine_intent else 1.0
+                final      = min(SCORE_CAP, (ce_score + rule_b * RULE_ALPHA) * temporal * fine_f)
                 scored.append((r, final))
 
         except Exception as exc:
@@ -213,7 +275,8 @@ def rerank(
         for r in chunks:
             rule_b   = _rule_boost(query_lower, query_refs, r.chunk)
             temporal = _temporal_factor(r.chunk)
-            adjusted = min(SCORE_CAP, (r.score + rule_b) * temporal)
+            fine_f   = _fine_intent_factor(r.chunk) if fine_intent else 1.0
+            adjusted = min(SCORE_CAP, (r.score + rule_b) * temporal * fine_f)
             scored.append((r, adjusted))
 
     scored.sort(key=lambda x: -x[1])
