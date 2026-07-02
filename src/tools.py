@@ -209,7 +209,11 @@ class LegalToolRegistry:
                 result="Calculator tool cần kết nối LLM (Ollama/Claude).",
             )
         try:
-            chunks = self.retriever.retrieve(description, top_k=6)
+            # parent expansion bắt buộc: mức tiền phạt ("Phạt tiền từ X đến Y đồng")
+            # nằm ở câu mở đầu của Khoản (parent), không nằm trong chunk Điểm a/b/c
+            chunks = self.retriever.retrieve(
+                description, top_k=6, use_parent_expansion=True,
+            )
             context_blocks: list[str] = []
             for i, r in enumerate(chunks, 1):
                 tags = [r.chunk.metadata.source]

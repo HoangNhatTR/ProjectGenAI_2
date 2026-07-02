@@ -19,6 +19,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from . import config
+from .cache import RetrievalCache
 from .generator import Generator
 from .guardrails import apply_guardrails
 from .reranker import rerank as _rerank
@@ -35,7 +36,7 @@ RETRIEVAL_MODES: dict[str, dict] = {
         "label": "RAG Full",
         "icon": "📚",
         "short": "Toàn bộ corpus",
-        "desc": "Vector + BM25 trên toàn bộ 609 luật (~68k chunks)",
+        "desc": "Vector + BM25 trên toàn bộ corpus (51.673 văn bản / 4,9M chunks)",
         "use_kg": False,
         "use_top10_filter": False,
         "color": "#2563EB",
@@ -57,9 +58,12 @@ RETRIEVAL_MODES: dict[str, dict] = {
         "label": "Graph RAG",
         "icon": "🕸️",
         "short": "Vector + KG",
-        "desc": "Vector + BM25 + Knowledge Graph (top 15 luật + KG semantic)",
+        # use_top10_filter=False từ 2026-06-13: corpus đã đủ 4,9M chunks toàn bộ
+        # VB (kể cả nghị định xử phạt như 168/2024) — filter top-15 luật khiến
+        # câu hỏi mức phạt không bao giờ thấy nghị định, chỉ ra Bộ luật Hình sự
+        "desc": "Vector + BM25 toàn corpus + Knowledge Graph semantic",
         "use_kg": True,
-        "use_top10_filter": True,
+        "use_top10_filter": False,
         "color": "#7C3AED",
         "bg": "#F5F3FF",
         "border": "#C4B5FD",
@@ -82,8 +86,8 @@ def provider_credentials(provider: str) -> tuple[str, str]:
 
 
 def resolve_model_provider(llm_model: str) -> str:
-    """Đoán provider từ model id: cc/ gh/ → 9Router; còn lại → KieAI."""
-    return "router9" if llm_model.startswith(("cc/", "gh/")) else "kieai"
+    """Đoán provider từ model id: cc/ gh/ kc/ → 9Router; còn lại → KieAI."""
+    return "router9" if llm_model.startswith(("cc/", "gh/", "kc/")) else "kieai"
 
 
 def make_generator(
@@ -159,6 +163,7 @@ class LegalPipeline:
         tool_registry: Any,
         top15_urls: Optional[list[str]] = None,
         export_link_base: Optional[str] = None,
+        retrieval_cache: Optional[RetrievalCache] = None,
     ):
         self.retriever = retriever
         self.generator = generator
@@ -168,6 +173,10 @@ class LegalPipeline:
         # Nếu set (vd http://localhost:8000) → append link tải DOCX vào kết quả
         # draft_document. API server set giá trị này; CLI/UI để None.
         self.export_link_base = export_link_base
+        # Cache retrieve+rerank — tránh chạy lại embedding + BM25 + CrossEncoder
+        # cho cùng (query, mode, top_k). Trước đây chỉ app.py (CLI) có cache;
+        # api.py production thì không → mọi request lặp đều tốn full retrieval.
+        self.retrieval_cache = retrieval_cache or RetrievalCache(maxsize=512, ttl=3600)
 
     # ── Generator per-request ─────────────────────────────────────────────────
 
@@ -189,6 +198,45 @@ class LegalPipeline:
             provider=provider, model=model,
             temperature=temperature, top_p=top_p,
         )
+
+    # ── Retrieve + rerank (có cache) ──────────────────────────────────────────
+
+    def _retrieve_rerank(
+        self,
+        search_query: str,
+        rag_mode: str,
+        top_k: int,
+        use_kg: bool,
+        allowed_sources: Optional[list[str]],
+        ce_threshold: float,
+    ) -> list:
+        """Retrieve + rerank với cache (key theo rag_mode + top_k + query).
+
+        Cùng logic cho Flow C (RAG) và Flow B (citation của tool) — gom về một
+        chỗ + thêm cache. Smart skip CrossEncoder khi top RRF score đã cao.
+        """
+        cache = self.retrieval_cache
+        cached = cache.get(search_query, top_k, None, namespace=rag_mode)
+        if cached is not None:
+            logger.info(f"Retrieve+rerank CACHE HIT — {len(cached)} chunks [{cache.stats_str()}]")
+            return cached
+
+        _t0 = time.time()
+        contexts = self.retriever.retrieve(
+            search_query, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
+            use_hyde=config.USE_HYDE, use_parent_expansion=True,
+        )
+        logger.info(f"Retrieve {time.time()-_t0:.2f}s — {len(contexts)} chunks")
+
+        if contexts:
+            _use_ce = contexts[0].score < ce_threshold
+            contexts = _rerank(
+                search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce,
+            )
+            logger.info(f"Rerank CE={'on' if _use_ce else 'skip'} ({len(contexts)} chunks)")
+
+        cache.put(search_query, top_k, None, contexts, namespace=rag_mode)
+        return contexts
 
     # ── Phase 1: prepare ──────────────────────────────────────────────────────
 
@@ -245,26 +293,15 @@ class LegalPipeline:
         if decision.action == "use_tool" and decision.tool_name:
             return self._tool_flow(
                 decision, user_input, conv_state, llm_history,
-                top_k, use_kg, allowed_sources,
+                top_k, use_kg, allowed_sources, ce_threshold, rag_mode,
             )
 
         # ── Flow C: RAG retrieve ─────────────────────────────────────────────
         search_query = decision.search_query or user_input
 
-        _t0 = time.time()
-        contexts = self.retriever.retrieve(
-            search_query, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
-            use_hyde=config.USE_HYDE, use_parent_expansion=True,
+        contexts = self._retrieve_rerank(
+            search_query, rag_mode, top_k, use_kg, allowed_sources, ce_threshold,
         )
-        logger.info(f"Retrieve {time.time()-_t0:.2f}s — {len(contexts)} chunks")
-
-        # Rerank — smart skip CrossEncoder nếu RRF score đã cao
-        if contexts:
-            _use_ce = contexts[0].score < ce_threshold
-            contexts = _rerank(
-                search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce,
-            )
-            logger.info(f"Rerank CE={'on' if _use_ce else 'skip'} ({len(contexts)} chunks)")
 
         if not contexts:
             ans = Answer(
@@ -295,6 +332,8 @@ class LegalPipeline:
         top_k: int,
         use_kg: bool,
         allowed_sources: Optional[list[str]],
+        ce_threshold: float = 0.04,
+        rag_mode: str = "graph_rag",
     ) -> PipelinePrep:
         """Flow B: thực thi tool theo router decision."""
         tool_registry = self.tool_registry
@@ -366,9 +405,13 @@ class LegalPipeline:
                 llm_history=llm_history,
             )
 
+        # Retrieve cho citation của tool flow — cùng chất lượng với Flow C:
+        # parent expansion (mức tiền phạt thường nằm ở câu mở đầu Khoản = parent)
+        # + rerank (recency boost đè văn bản cũ xuống). Thiếu 2 bước này từng
+        # khiến citation toàn Bộ luật Hình sự 2015 thay vì NĐ 168/2024.
         search_q = decision.search_query or user_input
-        contexts = self.retriever.retrieve(
-            search_q, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
+        contexts = self._retrieve_rerank(
+            search_q, rag_mode, top_k, use_kg, allowed_sources, ce_threshold,
         )
 
         return PipelinePrep(

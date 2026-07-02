@@ -87,7 +87,7 @@ AVAILABLE_MODELS = [
     {"id": "legal-ai-top15",  "object": "model", "created": 1700000000,
      "owned_by": "legal-ai", "description": "RAG Top-15: chỉ trên 15 luật trọng yếu"},
     {"id": "legal-ai-full",   "object": "model", "created": 1700000000,
-     "owned_by": "legal-ai", "description": "RAG Full: toàn bộ 609 luật VN"},
+     "owned_by": "legal-ai", "description": "RAG Full: toàn bộ corpus 51.673 văn bản"},
     {"id": "legal-ai",        "object": "model", "created": 1700000000,
      "owned_by": "legal-ai", "description": "Alias của legal-ai-graph (mặc định)"},
 ]
@@ -129,7 +129,7 @@ def _load_agent() -> None:
     kg_retriever = None
     if _KG_AVAILABLE:
         try:
-            kg_retriever = KGRetriever()
+            kg_retriever = KGRetriever(embedder=embedder)
         except Exception as e:
             print(f"[API] KG không khả dụng: {e}")
 
@@ -161,11 +161,21 @@ def _load_agent() -> None:
         provider=config.LLM_PROVIDER, api_key=_api_key,
     )
     _router_model = getattr(config, "ROUTER_MODEL", config.LLM_MODEL)
+    # Router có thể chạy provider KHÁC generator (vd router=9Router, generator=Groq)
+    # — nếu không tách, quota generator chết kéo router chết theo (Groq TPD 100k)
+    _r_provider, (_r_key, _r_host) = config.LLM_PROVIDER, (_api_key, _llm_host)
+    if _router_model.startswith(("cc/", "gh/", "kc/")):
+        _r_provider = "router9"
+        _r_key, _r_host = provider_credentials("router9")
+    # Classifier tất định (tái dùng embedder BGE-M3 đã load) chạy trước LLM router
+    from src.intent_classifier import IntentClassifier
+    _intent_clf = IntentClassifier(embedder=embedder)
     router = SmartRouter(
-        model=_router_model, host=_llm_host,
-        provider=config.LLM_PROVIDER, api_key=_api_key,
+        model=_router_model, host=_r_host,
+        provider=_r_provider, api_key=_r_key,
+        classifier=_intent_clf,
     )
-    print(f"[API] Router model : {_router_model}")
+    print(f"[API] Router model : {_router_model} (+ classifier tất định)")
     print(f"[API] Generator    : {config.LLM_MODEL}")
 
     ollama_client = generator.get_client()
@@ -329,6 +339,95 @@ async def get_model(model_id: str, authorization: Optional[str] = Header(None)):
         if m["id"] == model_id:
             return m
     raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+
+class ModelCheckRequest(BaseModel):
+    llm_model: str
+
+
+# Thời gian tối đa chờ model "ping" trước khi coi như không phản hồi
+_MODEL_CHECK_TIMEOUT_S = 25.0
+
+
+@app.post("/v1/model_check")
+async def model_check(
+    req: ModelCheckRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Ping nhanh 1 LLM model để biết nó còn sống / key còn hạn / quota còn không.
+
+    Gửi 1 prompt cực ngắn qua đúng provider của model (router9/kieai...) và đo
+    latency. Luôn trả HTTP 200; field `ok` cho biết model có hoạt động hay không
+    để frontend hiển thị chấm xanh/đỏ bên cạnh selector.
+    """
+    _require_auth(authorization)
+
+    from src.llm_client import create_client
+    from src.pipeline import resolve_model_provider
+
+    model = (req.llm_model or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Thiếu llm_model")
+
+    provider = resolve_model_provider(model)
+    api_key, host = provider_credentials(provider)
+
+    def _ping() -> float:
+        t0 = time.time()
+        client = create_client(provider, api_key or "", host)
+        resp = client.chat(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            options={"temperature": 0.0, "max_tokens": 1, "num_ctx": 64},
+        )
+        # Đọc content để chắc chắn round-trip thành công (1 số provider chỉ lỗi
+        # khi truy cập choices). Nội dung không quan trọng.
+        _ = (resp.get("message") or {}).get("content", "")
+        return time.time() - t0
+
+    loop = asyncio.get_event_loop()
+    try:
+        dt = await asyncio.wait_for(
+            loop.run_in_executor(None, _ping),
+            timeout=_MODEL_CHECK_TIMEOUT_S,
+        )
+        return {
+            "ok": True, "model": model, "provider": provider,
+            "latency_ms": int(dt * 1000),
+        }
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=200, content={
+            "ok": False, "model": model, "provider": provider,
+            "error": f"Không phản hồi trong {int(_MODEL_CHECK_TIMEOUT_S)}s (timeout/quá tải).",
+        })
+    except Exception as exc:
+        return JSONResponse(status_code=200, content={
+            "ok": False, "model": model, "provider": provider,
+            "error": str(exc)[:300],
+        })
+
+
+class EmbedRequest(BaseModel):
+    texts: list[str]
+
+
+@app.post("/v1/embed")
+async def embed(req: EmbedRequest, authorization: Optional[str] = Header(None)):
+    """Embed văn bản bằng BGE-M3 đã nạp sẵn (L2-normalize → dot = cosine).
+
+    Dùng để Module 2 (legal_ner) làm RAG trên CHÍNH bản án mà KHÔNG phải nạp
+    BGE-M3 lần thứ hai (tránh OOM): chunk bản án → gọi endpoint này → cosine cục bộ.
+    """
+    _require_auth(authorization)
+    embedder = _agent.get("embedder")
+    if embedder is None:
+        raise HTTPException(status_code=503, detail="Embedder chưa sẵn sàng")
+    if not req.texts:
+        return {"vectors": []}
+    vectors = await asyncio.get_event_loop().run_in_executor(
+        None, embedder.encode, req.texts
+    )
+    return {"vectors": vectors}
 
 
 # Đường dẫn tuyệt đối theo config — không phụ thuộc CWD lúc chạy uvicorn

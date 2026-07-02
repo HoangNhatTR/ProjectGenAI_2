@@ -21,8 +21,9 @@ from typing import Optional
 from .schemas import RetrievedChunk
 
 
-def _make_key(query: str, top_k: int, min_score: Optional[float]) -> str:
-    raw = f"{query.strip().lower()}|{top_k}|{min_score}"
+def _make_key(query: str, top_k: int, min_score: Optional[float], namespace: str = "") -> str:
+    # namespace tách kết quả theo rag_mode (use_kg/filter khác → kết quả khác).
+    raw = f"{namespace}|{query.strip().lower()}|{top_k}|{min_score}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -43,8 +44,9 @@ class RetrievalCache:
         query: str,
         top_k: int,
         min_score: Optional[float],
+        namespace: str = "",
     ) -> Optional[list[RetrievedChunk]]:
-        key = _make_key(query, top_k, min_score)
+        key = _make_key(query, top_k, min_score, namespace)
         with self._lock:
             if key not in self._store:
                 self.misses += 1
@@ -65,8 +67,9 @@ class RetrievalCache:
         top_k: int,
         min_score: Optional[float],
         results: list[RetrievedChunk],
+        namespace: str = "",
     ) -> None:
-        key = _make_key(query, top_k, min_score)
+        key = _make_key(query, top_k, min_score, namespace)
         with self._lock:
             if key in self._store:
                 self._store.move_to_end(key)

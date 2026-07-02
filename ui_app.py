@@ -71,7 +71,7 @@ def init_agent():
     if _KG_AVAILABLE:
         try:
             from src.kg.kg_retriever import KGRetriever
-            kg_retriever = KGRetriever()
+            kg_retriever = KGRetriever(embedder=embedder)
         except Exception:
             kg_retriever = None
 
@@ -83,7 +83,7 @@ def init_agent():
     )
 
     top15_urls: list[str] = []
-    manifest_path = config.DATA_DIR / "comparison" / "top10_laws" / "manifest.json"
+    manifest_path = config.DATA_DIR / "comparison" / "top15_laws" / "manifest.json"
     if manifest_path.exists():
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -91,23 +91,25 @@ def init_agent():
         except Exception:
             top15_urls = []
 
-    _api_key = {
-        "gemini": config.GEMINI_API_KEY,
-        "groq": config.GROQ_API_KEY,
-    }.get(config.LLM_PROVIDER)
+    # Map provider → (key, host) từ pipeline — tránh dict local thiếu "kieai"
+    # (→ api_key=None + host hardcode Ollama → base_url sai).
+    from src.pipeline import provider_credentials
+    _api_key, _llm_host = provider_credentials(config.LLM_PROVIDER)
 
     generator = Generator(
         model=config.LLM_MODEL,
-        host=config.OLLAMA_HOST,
+        host=_llm_host,
         temperature=config.LLM_TEMPERATURE,
         provider=config.LLM_PROVIDER,
         api_key=_api_key,
     )
+    from src.intent_classifier import IntentClassifier
     router = SmartRouter(
         model=config.LLM_MODEL,
-        host=config.OLLAMA_HOST,
+        host=_llm_host,
         provider=config.LLM_PROVIDER,
         api_key=_api_key,
+        classifier=IntentClassifier(embedder=embedder),
     )
 
     ollama_client = generator.get_client()

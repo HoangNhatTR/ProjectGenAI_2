@@ -267,7 +267,7 @@ def main() -> None:
     kg_retriever = None
     try:
         from src.kg.kg_retriever import KGRetriever
-        kg_retriever = KGRetriever()
+        kg_retriever = KGRetriever(embedder=embedder)
     except Exception:
         kg_retriever = None
 
@@ -277,17 +277,10 @@ def main() -> None:
         embedder, vstore, bm25=bm25, kg_retriever=kg_retriever,
         parent_store=_parent_store,
     )
-    _api_key = {
-        "gemini":     config.GEMINI_API_KEY,
-        "groq":       config.GROQ_API_KEY,
-        "router9":    config.ROUTER9_API_KEY,
-        "openrouter": config.OPENROUTER_API_KEY,
-    }.get(config.LLM_PROVIDER)
-
-    _llm_host = {
-        "router9":    config.ROUTER9_BASE_URL,
-        "openrouter": config.OPENROUTER_BASE_URL,
-    }.get(config.LLM_PROVIDER, config.OLLAMA_HOST)
+    # Map provider → (key, host) dùng chung từ pipeline — tránh dict local thiếu
+    # "kieai" (→ api_key=None + host rơi về Ollama). Xem provider_credentials.
+    from src.pipeline import provider_credentials
+    _api_key, _llm_host = provider_credentials(config.LLM_PROVIDER)
 
     generator = Generator(
         model=config.LLM_MODEL,
@@ -296,22 +289,22 @@ def main() -> None:
         provider=config.LLM_PROVIDER,
         api_key=_api_key,
     )
-    _router_api_key = {
-        "gemini":     config.GEMINI_API_KEY,
-        "groq":       config.GROQ_API_KEY,
-        "router9":    config.ROUTER9_API_KEY,
-        "openrouter": config.OPENROUTER_API_KEY,
-    }.get(config.LLM_PROVIDER)
-    _router_host = {
-        "router9":    config.ROUTER9_BASE_URL,
-        "openrouter": config.OPENROUTER_BASE_URL,
-    }.get(config.LLM_PROVIDER, config.OLLAMA_HOST)
+    # Router có thể chạy provider KHÁC generator (vd router=9Router, gen=kieai):
+    # model cc/ gh/ kc/ → 9Router, còn lại theo provider của generator.
+    _router_provider, _router_api_key, _router_host = (
+        config.LLM_PROVIDER, _api_key, _llm_host,
+    )
+    if config.ROUTER_MODEL.startswith(("cc/", "gh/", "kc/")):
+        _router_provider = "router9"
+        _router_api_key, _router_host = provider_credentials("router9")
 
+    from src.intent_classifier import IntentClassifier
     router    = SmartRouter(
         model=config.ROUTER_MODEL,
         host=_router_host,
-        provider=config.LLM_PROVIDER,
+        provider=_router_provider,
         api_key=_router_api_key,
+        classifier=IntentClassifier(embedder=embedder),
     )
     sessions  = SessionStore(config.DATA_DIR)
     memory    = MemoryStore(config.DATA_DIR / "memory.json")
