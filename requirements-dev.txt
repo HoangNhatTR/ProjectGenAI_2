@@ -1,0 +1,7 @@
+# Dev/test dependencies — cài THÊM vào venv đã có requirements.txt:
+#   pip install -r requirements-dev.txt
+# Chạy test:  python -m pytest tests/ -q
+
+pytest>=8.0
+httpx>=0.27        # fastapi.testclient (test_api_endpoints / test_api_units)
+ruff>=0.4          # lint + format:  ruff check src/ tests/

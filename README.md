@@ -148,12 +148,13 @@ ProjectGenAI_2/
 ### Cài đặt
 
 ```powershell
-# 1. Tạo virtualenv
+# 1. Tạo virtualenv (máy dev hiện tại đã có sẵn venv ..\Chatbot — dùng lại được:
+#    ..\Chatbot\Scripts\Activate.ps1)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# 2. Cài dependencies
-pip install -r requirements.txt
+# 2. Cài dependencies (runtime + dev/test)
+pip install -r requirements.txt -r requirements-dev.txt
 
 # 3. Config
 Copy-Item .env.example .env
@@ -172,7 +173,7 @@ streamlit run ui_app.py
 # CLI hỏi-đáp
 python app.py
 
-# Tests
+# Tests (cần requirements-dev.txt — pytest, httpx)
 python -m pytest tests/ -q
 ```
 

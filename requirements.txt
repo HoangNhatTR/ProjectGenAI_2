@@ -1,5 +1,6 @@
-# Cài đặt:  pip install -r requirements.txt
-# Bật venv:  .\Chatbot\Scripts\Activate.ps1   (PowerShell)
+# Cài đặt:  pip install -r requirements.txt -r requirements-dev.txt
+# Bật venv:  ..\Chatbot\Scripts\Activate.ps1   (PowerShell — venv nằm ở thư mục cha)
+# Dev/test deps (pytest, httpx, ruff) khai báo riêng ở requirements-dev.txt
 
 # --- Parsing ---
 pypdf==6.10.2
