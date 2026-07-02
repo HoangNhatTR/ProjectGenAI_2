@@ -58,3 +58,14 @@ pyvis>=0.3.2          # visualize graph trong Streamlit
 # --- OpenSearch backend (VECTOR_BACKEND=opensearch) ---
 opensearch-py>=2.4.0
 pyarrow>=15.0.0       # export/ingest embeddings qua parquet
+
+# --- Module 2: Legal NER (phân tích bản án) — service riêng port 8100 ---
+# Chạy:  cd legal_ner && uvicorn api.main:app --port 8100
+PyMuPDF>=1.24          # fitz: đọc text-layer PDF (extractor=pymupdf, mặc định trên Windows)
+transformers>=4.46     # token-classification (xlm-roberta-base) cho NER
+pikepdf>=8.0           # verify/forgery.py — phân tích metadata PDF (Layer 4 forgery)
+easyocr>=1.7           # OCR bản án scan/ảnh (api/ocr_easyocr.py); kéo theo torchvision
+# (tùy chọn) sentence-transformers đã có sẵn ở trên — dùng cho charge-match tiebreaker
+# Hai gói dưới CHỈ cần khi TRAIN/EVAL lại model NER, bỏ qua nếu chỉ chạy inference/API:
+datasets>=2.19         # training.train
+seqeval>=1.2           # training.evaluate

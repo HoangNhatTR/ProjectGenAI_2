@@ -37,10 +37,10 @@ HF_REPO = "HoangNhat1304/legalai-vectorstore"
 HF_PREFIX = "embeddings_export/"
 
 
-def _iter_shard_paths(local_dir: str | None):
+def _iter_shard_paths(local_dir: str | None, start_shard: int = 0):
     """Yield (tên shard, path local, callback dọn dẹp)."""
     if local_dir:
-        for p in sorted(Path(local_dir).glob("shard_*.parquet")):
+        for p in sorted(Path(local_dir).glob("shard_*.parquet"))[start_shard:]:
             yield p.name, p, (lambda: None)
         return
 
@@ -56,6 +56,9 @@ def _iter_shard_paths(local_dir: str | None):
     )
     assert names, f"Không thấy shard nào tại {HF_REPO}/{HF_PREFIX} — chạy export_embeddings trước"
     print(f"Tìm thấy {len(names)} shards trên HF", flush=True)
+    if start_shard:
+        names = names[start_shard:]
+        print(f"  → resume: bỏ qua {start_shard} shard đầu, còn {len(names)} shard", flush=True)
 
     def _dl(name: str) -> Path:
         return Path(hf_hub_download(
@@ -78,7 +81,12 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--local-dir", default=None, help="Thư mục chứa shard_*.parquet đã tải sẵn")
     p.add_argument("--reset", action="store_true", help="Xóa index cũ trước khi ingest")
+    p.add_argument("--start-shard", type=int, default=0,
+                   help="Resume sau khi gián đoạn: bỏ qua N shard đầu đã ingest đủ "
+                        "(mỗi shard 100k docs → N = docs.count // 100_000; "
+                        "index theo _id nên ingest lại shard dở là an toàn)")
     args = p.parse_args()
+    assert not (args.reset and args.start_shard), "--reset và --start-shard loại trừ nhau"
 
     import pyarrow.parquet as pq
     from opensearchpy import helpers
@@ -101,7 +109,7 @@ def main() -> None:
     total = 0
     t0 = time.time()
     try:
-        for name, path, cleanup in _iter_shard_paths(args.local_dir):
+        for name, path, cleanup in _iter_shard_paths(args.local_dir, args.start_shard):
             table = pq.read_table(path)
             ids = table.column("id").to_pylist()
             texts = table.column("text").to_pylist()

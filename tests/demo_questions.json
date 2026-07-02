@@ -1,0 +1,119 @@
+{
+  "_meta": {
+    "description": "Bộ 77 câu test tính năng chatbot Legal AI Agent — chạy bằng: python -m scripts.run_question_suite",
+    "created": "2026-06-13",
+    "expect_any": "PASS nếu câu trả lời chứa ÍT NHẤT 1 từ khóa (không phân biệt hoa thường)",
+    "categories": {
+      "GT": "Giao thông NĐ 168/2024", "HS": "Hình sự", "DS": "Dân sự", "LD": "Lao động",
+      "DD": "Đất đai", "HN": "Hôn nhân gia đình", "DN": "Doanh nghiệp/Thuế",
+      "CALC": "Tính tổng phạt nhiều lỗi (tool calculate_fine)", "CMP": "So sánh (tool compare)",
+      "KG": "Quan hệ văn bản / Knowledge Graph", "DRAFT": "Soạn thảo văn bản (tool draft)",
+      "FU": "Câu hỏi nối tiếp có ngữ cảnh", "CHAT": "Chitchat/meta/clarify/ngoài phạm vi",
+      "EFF": "Hiệu lực văn bản / quy định mới nhất"
+    }
+  },
+  "questions": [
+    {"id": "GT01", "category": "GT", "question": "xe máy vượt đèn đỏ bị phạt bao nhiêu tiền?", "expect_any": ["168/2024"]},
+    {"id": "GT02", "category": "GT", "question": "ô tô vượt đèn đỏ phạt bao nhiêu?", "expect_any": ["168/2024"]},
+    {"id": "GT03", "category": "GT", "question": "đi xe máy không đội mũ bảo hiểm bị phạt thế nào?", "expect_any": ["mũ bảo hiểm"]},
+    {"id": "GT04", "category": "GT", "question": "mức phạt nồng độ cồn đối với người lái ô tô là bao nhiêu?", "expect_any": ["cồn", "168/2024"]},
+    {"id": "GT05", "category": "GT", "question": "xe máy chạy quá tốc độ 15 km/h bị phạt bao nhiêu?", "expect_any": ["tốc độ"]},
+    {"id": "GT06", "category": "GT", "question": "không mang giấy phép lái xe khi điều khiển ô tô bị xử phạt ra sao?", "expect_any": ["giấy phép"]},
+    {"id": "GT07", "category": "GT", "question": "đi ngược chiều trên đường một chiều bằng xe máy phạt bao nhiêu?", "expect_any": ["ngược chiều"]},
+    {"id": "GT08", "category": "GT", "question": "sử dụng điện thoại khi đang lái ô tô bị phạt thế nào?", "expect_any": ["điện thoại"]},
+    {"id": "GT09", "category": "GT", "question": "xe máy đi vào đường cao tốc bị phạt bao nhiêu tiền?", "expect_any": ["cao tốc"]},
+    {"id": "GT10", "category": "GT", "question": "vượt đèn vàng có bị phạt không?", "expect_any": ["đèn vàng", "tín hiệu"]},
+
+    {"id": "HS01", "category": "HS", "question": "trộm cắp tài sản trị giá 3 triệu đồng bị xử lý hình sự như thế nào?", "expect_any": ["173", "trộm cắp"]},
+    {"id": "HS02", "category": "HS", "question": "tội lừa đảo chiếm đoạt tài sản bị phạt tù bao nhiêu năm?", "expect_any": ["174", "lừa đảo"]},
+    {"id": "HS03", "category": "HS", "question": "người 15 tuổi có phải chịu trách nhiệm hình sự không?", "expect_any": ["14 tuổi", "16 tuổi", "đủ 14", "đủ 16"]},
+    {"id": "HS04", "category": "HS", "question": "điều kiện để được hưởng án treo là gì?", "expect_any": ["án treo", "3 năm", "03 năm"]},
+    {"id": "HS05", "category": "HS", "question": "tội đua xe trái phép bị xử phạt như thế nào?", "expect_any": ["266", "đua xe"]},
+    {"id": "HS06", "category": "HS", "question": "đánh người gây thương tích 12% có bị đi tù không?", "expect_any": ["134", "thương tích"]},
+    {"id": "HS07", "category": "HS", "question": "tội giết người có khung hình phạt cao nhất là gì?", "expect_any": ["tử hình", "123", "chung thân"]},
+    {"id": "HS08", "category": "HS", "question": "tàng trữ trái phép chất ma túy bị xử lý thế nào?", "expect_any": ["249", "ma túy"]},
+
+    {"id": "DS01", "category": "DS", "question": "lãi suất cho vay tối đa theo Bộ luật Dân sự là bao nhiêu?", "expect_any": ["20%", "468"]},
+    {"id": "DS02", "category": "DS", "question": "người chết không để lại di chúc thì tài sản được chia như thế nào?", "expect_any": ["hàng thừa kế", "thừa kế theo pháp luật"]},
+    {"id": "DS03", "category": "DS", "question": "thời hiệu khởi kiện tranh chấp hợp đồng là bao lâu?", "expect_any": ["3 năm", "03 năm"]},
+    {"id": "DS04", "category": "DS", "question": "hợp đồng vay tiền viết tay có giá trị pháp lý không?", "expect_any": ["hợp đồng", "giao dịch"]},
+    {"id": "DS05", "category": "DS", "question": "làm hỏng tài sản của người khác thì phải bồi thường như thế nào?", "expect_any": ["bồi thường"]},
+    {"id": "DS06", "category": "DS", "question": "di chúc miệng có hợp pháp không?", "expect_any": ["di chúc", "người làm chứng"]},
+
+    {"id": "LD01", "category": "LD", "question": "thời gian thử việc tối đa là bao lâu?", "expect_any": ["60 ngày", "180 ngày"]},
+    {"id": "LD02", "category": "LD", "question": "lương thử việc ít nhất bằng bao nhiêu phần trăm lương chính thức?", "expect_any": ["85"]},
+    {"id": "LD03", "category": "LD", "question": "số giờ làm thêm tối đa trong một năm là bao nhiêu?", "expect_any": ["200", "300"]},
+    {"id": "LD04", "category": "LD", "question": "lao động nữ được nghỉ thai sản bao nhiêu tháng?", "expect_any": ["6 tháng", "06 tháng"]},
+    {"id": "LD05", "category": "LD", "question": "công ty muốn sa thải nhân viên thì cần điều kiện gì?", "expect_any": ["sa thải", "kỷ luật"]},
+    {"id": "LD06", "category": "LD", "question": "người lao động đơn phương chấm dứt hợp đồng cần báo trước bao lâu?", "expect_any": ["30 ngày", "45 ngày"]},
+    {"id": "LD07", "category": "LD", "question": "trợ cấp thôi việc được tính như thế nào?", "expect_any": ["trợ cấp", "nửa tháng"]},
+
+    {"id": "DD01", "category": "DD", "question": "điều kiện để được cấp sổ đỏ là gì?", "expect_any": ["chứng nhận", "quyền sử dụng đất"]},
+    {"id": "DD02", "category": "DD", "question": "nhà nước thu hồi đất thì người dân được bồi thường như thế nào?", "expect_any": ["bồi thường", "thu hồi"]},
+    {"id": "DD03", "category": "DD", "question": "muốn chuyển đất nông nghiệp sang đất ở cần thủ tục gì?", "expect_any": ["chuyển mục đích"]},
+    {"id": "DD04", "category": "DD", "question": "luật đất đai mới nhất là luật nào và có hiệu lực từ khi nào?", "expect_any": ["31/2024", "2024"]},
+    {"id": "DD05", "category": "DD", "question": "tranh chấp đất đai phải giải quyết ở đâu trước tiên?", "expect_any": ["hòa giải"]},
+
+    {"id": "HN01", "category": "HN", "question": "nam nữ bao nhiêu tuổi thì được kết hôn?", "expect_any": ["20", "18"]},
+    {"id": "HN02", "category": "HN", "question": "thủ tục ly hôn đơn phương như thế nào?", "expect_any": ["Tòa án", "đơn phương"]},
+    {"id": "HN03", "category": "HN", "question": "khi ly hôn thì tài sản chung được chia như thế nào?", "expect_any": ["chia đôi", "công sức", "tài sản chung"]},
+    {"id": "HN04", "category": "HN", "question": "mức cấp dưỡng nuôi con sau khi ly hôn là bao nhiêu?", "expect_any": ["cấp dưỡng", "thỏa thuận"]},
+    {"id": "HN05", "category": "HN", "question": "kết hôn với người nước ngoài cần những giấy tờ gì?", "expect_any": ["kết hôn", "hộ tịch"]},
+
+    {"id": "DN01", "category": "DN", "question": "thành lập công ty TNHH một thành viên cần những gì?", "expect_any": ["đăng ký", "TNHH"]},
+    {"id": "DN02", "category": "DN", "question": "vốn điều lệ tối thiểu khi mở công ty là bao nhiêu?", "expect_any": ["vốn điều lệ"]},
+    {"id": "DN03", "category": "DN", "question": "mức giảm trừ gia cảnh thuế thu nhập cá nhân hiện nay là bao nhiêu?", "expect_any": ["giảm trừ", "11 triệu"]},
+    {"id": "DN04", "category": "DN", "question": "hộ kinh doanh cá thể có phải nộp thuế không?", "expect_any": ["thuế"]},
+    {"id": "DN05", "category": "DN", "question": "doanh nghiệp chậm nộp thuế bị xử phạt như thế nào?", "expect_any": ["chậm nộp", "0,03"]},
+
+    {"id": "CALC01", "category": "CALC", "question": "tôi vừa vượt đèn đỏ vừa không đội mũ bảo hiểm khi đi xe máy, tổng tiền phạt là bao nhiêu?", "expect_any": ["tổng", "168/2024"]},
+    {"id": "CALC02", "category": "CALC", "question": "lái ô tô vượt quá tốc độ 25 km/h và quên mang bằng lái, tính tổng mức phạt giúp tôi", "expect_any": ["tổng", "tốc độ"]},
+    {"id": "CALC03", "category": "CALC", "question": "đi xe máy có nồng độ cồn 0.3 mg/lít khí thở và còn đi ngược chiều, bị phạt tổng cộng bao nhiêu?", "expect_any": ["cồn", "tổng"]},
+    {"id": "CALC04", "category": "CALC", "question": "xe máy chở 3 người và lạng lách đánh võng thì tổng mức phạt thế nào?", "expect_any": ["lạng lách", "chở"]},
+    {"id": "CALC05", "category": "CALC", "question": "ô tô vượt đèn đỏ, vừa dùng điện thoại vừa không thắt dây an toàn — tính tổng tiền phạt", "expect_any": ["tổng", "dây an toàn"]},
+
+    {"id": "CMP01", "category": "CMP", "question": "so sánh mức phạt vượt đèn đỏ giữa xe máy và ô tô", "expect_any": ["xe máy", "ô tô"]},
+    {"id": "CMP02", "category": "CMP", "question": "so sánh nghị định 100/2019 và nghị định 168/2024 về xử phạt nồng độ cồn", "expect_any": ["100/2019", "168/2024"]},
+    {"id": "CMP03", "category": "CMP", "question": "thử việc và hợp đồng chính thức khác nhau thế nào về quyền lợi?", "expect_any": ["thử việc"]},
+    {"id": "CMP04", "category": "CMP", "question": "so sánh ly hôn thuận tình và ly hôn đơn phương", "expect_any": ["thuận tình", "đơn phương"]},
+    {"id": "CMP05", "category": "CMP", "question": "phân biệt tội trộm cắp tài sản và tội cướp giật tài sản", "expect_any": ["trộm cắp", "cướp giật"]},
+
+    {"id": "KG01", "category": "KG", "question": "nghị định nào thay thế nghị định 100/2019/NĐ-CP về xử phạt vi phạm giao thông?", "expect_any": ["168"]},
+    {"id": "KG02", "category": "KG", "question": "luật trật tự an toàn giao thông đường bộ 2024 có hiệu lực từ ngày nào?", "expect_any": ["2025", "36/2024"]},
+    {"id": "KG03", "category": "KG", "question": "bộ luật hình sự 2015 được sửa đổi bổ sung bởi văn bản nào?", "expect_any": ["12/2017"]},
+    {"id": "KG04", "category": "KG", "question": "có những nghị định nào hướng dẫn thi hành luật đất đai 2024?", "expect_any": ["nghị định"]},
+    {"id": "KG05", "category": "KG", "question": "điều 260 bộ luật hình sự quy định về tội gì?", "expect_any": ["giao thông"]},
+    {"id": "KG06", "category": "KG", "question": "luật doanh nghiệp hiện hành là luật nào?", "expect_any": ["59/2020", "2020"]},
+
+    {"id": "DRAFT01", "category": "DRAFT", "question": "soạn giúp tôi đơn xin ly hôn thuận tình, tôi là Nguyễn Văn A, vợ là Trần Thị B, lý do không hợp nhau", "expect_any": ["đơn", "ly hôn"]},
+    {"id": "DRAFT02", "category": "DRAFT", "question": "viết giúp tôi đơn khiếu nại về việc hàng xóm lấn chiếm đất", "expect_any": ["khiếu nại"]},
+    {"id": "DRAFT03", "category": "DRAFT", "question": "soạn hợp đồng thuê nhà thời hạn 12 tháng giá 5 triệu mỗi tháng giúp tôi", "expect_any": ["hợp đồng", "thuê"]},
+    {"id": "DRAFT04", "category": "DRAFT", "question": "làm giúp tôi đơn tố cáo hành vi lừa đảo qua mạng", "expect_any": ["tố cáo"]},
+
+    {"id": "FU01", "category": "FU", "question": "còn ô tô thì sao?", "expect_any": ["ô tô"],
+     "history": [
+       {"role": "user", "content": "xe máy vượt đèn đỏ phạt bao nhiêu?"},
+       {"role": "assistant", "content": "Theo Nghị định 168/2024/NĐ-CP, xe máy vượt đèn đỏ bị phạt tiền và có thể bị trừ điểm giấy phép lái xe."}
+     ]},
+    {"id": "FU02", "category": "FU", "question": "nếu công ty kéo dài thử việc hơn thời hạn đó thì sao?", "expect_any": ["thử việc"],
+     "history": [
+       {"role": "user", "content": "thời gian thử việc tối đa là bao lâu?"},
+       {"role": "assistant", "content": "Theo Bộ luật Lao động 2019, thử việc tối đa 180 ngày với quản lý doanh nghiệp, 60 ngày với trình độ cao đẳng trở lên, 30 ngày với trung cấp, 6 ngày với công việc khác."}
+     ]},
+    {"id": "FU03", "category": "FU", "question": "vậy nếu đang hưởng án treo mà phạm tội mới thì thế nào?", "expect_any": ["án treo", "tù"],
+     "history": [
+       {"role": "user", "content": "điều kiện để được hưởng án treo là gì?"},
+       {"role": "assistant", "content": "Án treo áp dụng khi bị phạt tù không quá 3 năm, có nhân thân tốt, có nhiều tình tiết giảm nhẹ và xét thấy không cần bắt chấp hành hình phạt tù."}
+     ]},
+
+    {"id": "CHAT01", "category": "CHAT", "question": "xin chào bạn", "expect_any": ["chào", "giúp"]},
+    {"id": "CHAT02", "category": "CHAT", "question": "bạn là ai và có thể giúp gì cho tôi?", "expect_any": ["pháp luật", "trợ lý", "pháp lý"]},
+    {"id": "CHAT03", "category": "CHAT", "question": "luật", "expect_any": ["cụ thể", "rõ hơn", "chi tiết", "lĩnh vực"]},
+    {"id": "CHAT04", "category": "CHAT", "question": "cảm ơn bạn nhiều nhé", "expect_any": ["cảm ơn", "vui", "hỗ trợ"]},
+    {"id": "CHAT05", "category": "CHAT", "question": "giá vàng ngày mai sẽ tăng hay giảm?", "expect_any": ["pháp luật", "pháp lý", "không thể"]},
+
+    {"id": "EFF01", "category": "EFF", "question": "mức phạt nồng độ cồn xe máy theo quy định mới nhất hiện nay?", "expect_any": ["168/2024"]},
+    {"id": "EFF02", "category": "EFF", "question": "nghị định 46/2016 về xử phạt giao thông còn hiệu lực không?", "expect_any": ["hết hiệu lực", "thay thế"]},
+    {"id": "EFF03", "category": "EFF", "question": "quy định mới nhất về kiểm định xe ô tô là gì?", "expect_any": ["kiểm định", "đăng kiểm"]}
+  ]
+}

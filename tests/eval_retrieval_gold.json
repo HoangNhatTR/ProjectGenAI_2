@@ -1,0 +1,51 @@
+{
+  "_meta": {
+    "description": "Gold set ĐO CHẤT LƯỢNG RETRIEVAL (#6). HIT nếu top-k có chunk khớp expect_doc (số hiệu) HOẶC expect_title (tên luật, substring trong title) HOẶC expect_article (điều). Đo trực tiếp retrieve+rerank, KHÔNG qua LLM → nhanh + tất định.",
+    "created": "2026-06-15",
+    "grading_note": "Corpus phục vụ bộ luật qua NHIỀU bản (gốc + các Văn bản hợp nhất VBHN, số hiệu trùng/đổi theo năm) → chấm theo số hiệu cứng là SAI (vd Bộ luật Hình sự xuất hiện dưới 100/2015 lẫn 11/VBHN-VPQH 2025). expect_title bắt được cả bản gốc lẫn mọi bản hợp nhất vì title VBHN luôn chứa tên luật gốc. GT (nghị định xử phạt) chấm theo doc vì cần ĐÚNG nghị định hiện hành 168/2024.",
+    "categories": "GT=giao thông NĐ168, HS=hình sự, DS=dân sự, LD=lao động, DD=đất đai, HN=hôn nhân, DN=doanh nghiệp, EFF=hiệu lực/mới nhất"
+  },
+  "questions": [
+    {"id": "GT01", "category": "GT", "question": "xe máy vượt đèn đỏ bị phạt bao nhiêu tiền?", "expect_doc": ["168/2024"]},
+    {"id": "GT02", "category": "GT", "question": "ô tô vượt đèn đỏ phạt bao nhiêu?", "expect_doc": ["168/2024"]},
+    {"id": "GT03", "category": "GT", "question": "đi xe máy không đội mũ bảo hiểm bị phạt thế nào?", "expect_doc": ["168/2024"]},
+    {"id": "GT04", "category": "GT", "question": "mức phạt nồng độ cồn đối với người lái ô tô là bao nhiêu?", "expect_doc": ["168/2024"]},
+    {"id": "GT05", "category": "GT", "question": "ô tô chạy quá tốc độ trên 35 km/h bị phạt bao nhiêu tiền?", "expect_doc": ["168/2024"]},
+    {"id": "GT06", "category": "GT", "question": "không chấp hành hiệu lệnh của người điều khiển giao thông bị xử phạt ra sao?", "expect_doc": ["168/2024"]},
+    {"id": "GT07", "category": "GT", "question": "xe máy đi vào đường cao tốc bị phạt bao nhiêu tiền?", "expect_doc": ["168/2024"]},
+
+    {"id": "HS01", "category": "HS", "question": "tội trộm cắp tài sản bị xử lý hình sự như thế nào?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 173"]},
+    {"id": "HS02", "category": "HS", "question": "tội lừa đảo chiếm đoạt tài sản bị phạt tù bao nhiêu năm?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 174"]},
+    {"id": "HS03", "category": "HS", "question": "tội giết người có khung hình phạt cao nhất là gì?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 123"]},
+    {"id": "HS04", "category": "HS", "question": "đánh người gây thương tích bị xử lý hình sự thế nào?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 134"]},
+    {"id": "HS05", "category": "HS", "question": "tàng trữ trái phép chất ma túy bị xử lý thế nào?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 249"]},
+    {"id": "HS06", "category": "HS", "question": "tội vi phạm quy định về tham gia giao thông đường bộ quy định ở điều nào?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 260"]},
+    {"id": "HS07", "category": "HS", "question": "điều kiện để được hưởng án treo là gì?", "expect_title": ["Bộ luật Hình sự"], "expect_article": ["Điều 65"]},
+
+    {"id": "DS01", "category": "DS", "question": "lãi suất cho vay tối đa theo Bộ luật Dân sự là bao nhiêu?", "expect_title": ["Bộ luật Dân sự"], "expect_article": ["Điều 468"]},
+    {"id": "DS02", "category": "DS", "question": "người chết không để lại di chúc thì tài sản được chia thừa kế như thế nào?", "expect_title": ["Bộ luật Dân sự"]},
+    {"id": "DS03", "category": "DS", "question": "trách nhiệm bồi thường thiệt hại ngoài hợp đồng được quy định thế nào?", "expect_title": ["Bộ luật Dân sự"]},
+    {"id": "DS04", "category": "DS", "question": "di chúc miệng có hợp pháp không và điều kiện gì?", "expect_title": ["Bộ luật Dân sự"]},
+
+    {"id": "LD01", "category": "LD", "question": "thời gian thử việc tối đa là bao lâu theo Bộ luật Lao động?", "expect_title": ["Bộ luật Lao động"]},
+    {"id": "LD02", "category": "LD", "question": "số giờ làm thêm tối đa trong một năm là bao nhiêu?", "expect_title": ["Bộ luật Lao động"]},
+    {"id": "LD03", "category": "LD", "question": "lao động nữ được nghỉ thai sản bao nhiêu tháng?", "expect_title": ["Bộ luật Lao động"]},
+    {"id": "LD04", "category": "LD", "question": "người lao động đơn phương chấm dứt hợp đồng cần báo trước bao lâu?", "expect_title": ["Bộ luật Lao động"]},
+    {"id": "LD05", "category": "LD", "question": "trợ cấp thôi việc được tính như thế nào theo bộ luật lao động?", "expect_title": ["Bộ luật Lao động"]},
+
+    {"id": "DD01", "category": "DD", "question": "điều kiện để được cấp giấy chứng nhận quyền sử dụng đất là gì?", "expect_title": ["Luật Đất đai"]},
+    {"id": "DD02", "category": "DD", "question": "nhà nước thu hồi đất thì người dân được bồi thường như thế nào?", "expect_title": ["Luật Đất đai"]},
+    {"id": "DD03", "category": "DD", "question": "thủ tục chuyển đất nông nghiệp sang đất ở quy định thế nào?", "expect_title": ["Luật Đất đai"]},
+
+    {"id": "HN01", "category": "HN", "question": "nam nữ bao nhiêu tuổi thì được kết hôn?", "expect_title": ["Luật Hôn nhân và gia đình"]},
+    {"id": "HN02", "category": "HN", "question": "khi ly hôn thì tài sản chung của vợ chồng được chia như thế nào?", "expect_title": ["Luật Hôn nhân và gia đình"]},
+    {"id": "HN03", "category": "HN", "question": "nghĩa vụ cấp dưỡng nuôi con sau khi ly hôn quy định thế nào?", "expect_title": ["Luật Hôn nhân và gia đình"]},
+
+    {"id": "DN01", "category": "DN", "question": "thành lập công ty trách nhiệm hữu hạn một thành viên cần điều kiện gì?", "expect_title": ["Luật Doanh nghiệp"]},
+    {"id": "DN02", "category": "DN", "question": "quyền và nghĩa vụ của cổ đông trong công ty cổ phần?", "expect_title": ["Luật Doanh nghiệp"]},
+
+    {"id": "EFF01", "category": "EFF", "question": "luật đất đai mới nhất là luật nào và có hiệu lực từ khi nào?", "expect_title": ["Luật Đất đai"]},
+    {"id": "EFF02", "category": "EFF", "question": "luật doanh nghiệp hiện hành là luật nào?", "expect_title": ["Luật Doanh nghiệp"]},
+    {"id": "EFF03", "category": "EFF", "question": "bộ luật hình sự được sửa đổi bổ sung năm 2017 bởi luật nào?", "expect_doc": ["12/2017"], "expect_title": ["Bộ luật Hình sự"]}
+  ]
+}
