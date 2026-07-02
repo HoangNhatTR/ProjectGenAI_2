@@ -25,6 +25,35 @@ _POINT_RE = re.compile(r"(?m)^([a-zđ])\)\s")
 
 _HAS_ARTICLE_RE = re.compile(r"(?m)^Điều\s+\d+")
 
+# ── Chuẩn hoá cấu trúc bị "làm phẳng" khi crawl ────────────────────────────────
+# Một số văn bản (vbpl all_laws) bị mất xuống dòng → "Điều N." nằm GIỮA dòng
+# (vd "...Chương I NHỮNG QUY ĐỊNH CHUNG Điều 1. Phạm vi...") nên regex cấu trúc
+# (neo đầu dòng ^) KHÔNG khớp → article=null cho cả văn bản (503 VB / 78k chunk
+# phát hiện qua scan_unstructured.py). Khắc phục AN TOÀN: chèn lại '\n' trước
+# heading Điều/Chương rồi để pipeline cũ chạy nguyên — KHÔNG đổi logic chunk.
+#
+# Phân biệt HEADING vs TRÍCH DẪN: heading là "Điều N." + dấu chấm + KHOẢNG TRẮNG
+# + chữ HOA (tiêu đề Điều). Trích dẫn ("tại Điều 9 Thông tư", "Điều 5 của Luật",
+# "khoản 2 Điều 8") KHÔNG có dạng '. <Hoa>' ngay sau số → không bị tách nhầm.
+_VN_UPPER = (
+    "A-Z"
+    "ĐÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊ"
+    "ÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴ"
+)
+_INLINE_ARTICLE_RE = re.compile(rf"(?<!\n)\s+(?=Điều\s+\d+\s*\.\s+[{_VN_UPPER}])")
+_INLINE_CHAPTER_RE = re.compile(r"(?<!\n)\s+(?=(?:CHƯƠNG|Chương)\s+(?:[IVXLCDM]+|\d+)\b)")
+
+
+def _normalize_structure(text: str) -> str:
+    """Chèn '\\n' trước heading Điều/Chương bị làm phẳng để regex cấu trúc nhận ra.
+
+    An toàn với văn bản đã đúng cấu trúc (heading đã ở đầu dòng → không đổi).
+    """
+    text = _INLINE_ARTICLE_RE.sub("\n", text)
+    text = _INLINE_CHAPTER_RE.sub("\n", text)
+    return text
+
+
 _DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", "; ", " ", ""]
 
 # Số ký tự tối đa cho 1 parent entry.
@@ -307,7 +336,14 @@ def chunk_document(
     doc: RawDocument,
     parent_store: Optional[Any] = None,
 ) -> list[Chunk]:
-    """Chọn chiến lược chunk dựa trên cấu trúc văn bản."""
+    """Chọn chiến lược chunk dựa trên cấu trúc văn bản.
+
+    Trước tiên chuẩn hoá heading Điều/Chương bị làm phẳng (crawl) → văn bản mất
+    cấu trúc nay được chunk theo Điều thay vì rơi về recursive (article=null).
+    """
+    norm = _normalize_structure(doc.text)
+    if norm != doc.text:
+        doc = doc.model_copy(update={"text": norm})
     if _HAS_ARTICLE_RE.search(doc.text):
         return chunk_by_legal_structure(
             doc, config.CHUNK_SIZE, config.CHUNK_OVERLAP,
