@@ -440,15 +440,19 @@ class RetrieveRequest(BaseModel):
     query: str
     top_k: int = 5
     model: str = "legal-ai-graph"  # map sang RAG mode như /v1/chat/completions
+    # False: trả RRF fusion THÔ, bỏ CrossEncoder + phễu — nhanh (~3-8s thay vì
+    # 20-80s). Đủ cho bài toán KIỂM TỒN TẠI (có Điều N của VB X trong kho không)
+    # — không cần thứ hạng đẹp, cần nhiều ứng viên nhanh.
+    rerank: bool = True
 
 
 @app.post("/v1/retrieve")
 async def retrieve_only(req: RetrieveRequest, authorization: Optional[str] = Header(None)):
-    """Retrieve + rerank THUẦN (không generate) — trả metadata chunks.
+    """Retrieve (± rerank) THUẦN — không generate, trả metadata chunks.
 
     Dùng cho: Module 2 kiểm chứng viện dẫn trên kho luật lớn (corpus_check),
     debug ranking, hoặc bất kỳ client nào chỉ cần nguồn không cần câu trả lời.
-    Đi qua cùng _retrieve_rerank với chat (cache chung, phễu CE chung).
+    rerank=true đi qua cùng _retrieve_rerank với chat (cache chung, phễu CE chung).
     """
     _require_auth(authorization)
     pipeline: LegalPipeline = _agent.get("pipeline")
@@ -459,16 +463,21 @@ async def retrieve_only(req: RetrieveRequest, authorization: Optional[str] = Hea
 
     rag_mode = MODEL_TO_MODE.get(req.model, "graph_rag")
     mode_cfg = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
-    contexts = await asyncio.get_event_loop().run_in_executor(
-        None,
-        functools.partial(
+    top_k = max(1, min(req.top_k, 20))
+    allowed = pipeline.top15_urls if mode_cfg["use_top10_filter"] else None
+
+    if req.rerank:
+        _call = functools.partial(
             pipeline._retrieve_rerank,
-            req.query, rag_mode, max(1, min(req.top_k, 20)),
-            mode_cfg["use_kg"],
-            pipeline.top15_urls if mode_cfg["use_top10_filter"] else None,
-            0.04,
-        ),
-    )
+            req.query, rag_mode, top_k, mode_cfg["use_kg"], allowed, 0.04,
+        )
+    else:
+        _call = functools.partial(
+            pipeline.retriever.retrieve,
+            req.query, top_k=top_k, use_kg=mode_cfg["use_kg"],
+            allowed_sources=allowed, use_parent_expansion=False,
+        )
+    contexts = await asyncio.get_event_loop().run_in_executor(None, _call)
     return {
         "query": req.query,
         "chunks": [
