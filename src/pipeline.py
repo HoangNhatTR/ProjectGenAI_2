@@ -28,6 +28,10 @@ from .state import ConversationState
 
 MAX_HISTORY = 10
 
+# Intent chắc chắn là câu tra cứu đơn giản → khỏi tốn 1 LLM call cho planner
+# (đồng bộ với app.py — trước đây chỉ CLI/Streamlit có planner, API thì không)
+_SIMPLE_INTENTS = {"legal", "consulting", "followup"}
+
 # ── Retrieval modes ────────────────────────────────────────────────────────────
 # use_kg / use_top10_filter là logic; các key còn lại là metadata hiển thị UI.
 
@@ -149,9 +153,9 @@ class PipelinePrep:
 
 
 class LegalPipeline:
-    """Pipeline Legal AI Agent: router → tool → retrieve → rerank → generate.
+    """Pipeline Legal AI Agent: router → tool/planner → retrieve → rerank → generate.
 
-    Components (retriever, generator, router, tool_registry) được inject —
+    Components (retriever, generator, router, tool_registry, planner) được inject —
     pipeline không tự load model để mỗi entry point tự quản lifecycle/cache.
     """
 
@@ -164,11 +168,14 @@ class LegalPipeline:
         top15_urls: Optional[list[str]] = None,
         export_link_base: Optional[str] = None,
         retrieval_cache: Optional[RetrievalCache] = None,
+        planner: Any = None,
     ):
         self.retriever = retriever
         self.generator = generator
         self.router = router
         self.tool_registry = tool_registry
+        # Planner đa bước (optional) — None = Flow C RAG thuần như cũ
+        self.planner = planner
         self.top15_urls = top15_urls or []
         # Nếu set (vd http://localhost:8000) → append link tải DOCX vào kết quả
         # draft_document. API server set giá trị này; CLI/UI để None.
@@ -225,6 +232,7 @@ class LegalPipeline:
         contexts = self.retriever.retrieve(
             search_query, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
             use_hyde=config.USE_HYDE, use_parent_expansion=True,
+            use_multi_query=config.USE_MULTI_QUERY,
         )
         logger.info(f"Retrieve {time.time()-_t0:.2f}s — {len(contexts)} chunks")
 
@@ -248,8 +256,9 @@ class LegalPipeline:
         top_k: int = 5,
         web_search_enabled: bool = True,
         ce_threshold: float = 0.04,
+        use_planner: bool = True,
     ) -> PipelinePrep:
-        """Router → tool → retrieve → rerank (synchronous, chưa generate)."""
+        """Router → tool → (planner) → retrieve → rerank (synchronous, chưa generate)."""
         mode_cfg = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
         use_kg = mode_cfg["use_kg"]
         allowed_sources = self.top15_urls if mode_cfg["use_top10_filter"] else None
@@ -296,14 +305,38 @@ class LegalPipeline:
                 top_k, use_kg, allowed_sources, ce_threshold, rag_mode,
             )
 
-        # ── Flow C: RAG retrieve ─────────────────────────────────────────────
+        # ── Flow C: RAG retrieve (+ optional Planner đa bước) ────────────────
         search_query = decision.search_query or user_input
+        tool_results: list = []
+
+        # Planner: câu hỏi phức hợp (nhiều lỗi vi phạm, so sánh, tính tổng...)
+        # → lập plan → execute tool steps → retrieve theo query của plan.
+        # Chỉ gọi khi intent KHÔNG chắc chắn đơn giản (tiết kiệm 1 LLM call).
+        if (
+            use_planner
+            and self.planner is not None
+            and decision.intent not in _SIMPLE_INTENTS
+        ):
+            try:
+                _t0 = time.time()
+                plan = self.planner.create_plan(user_input, state=conv_state)
+                if plan.is_complex():
+                    tool_results = self.planner.execute_plan(plan)
+                    search_query = plan.retrieve_query()
+                    logger.info(
+                        f"Planner {time.time()-_t0:.2f}s — complex, "
+                        f"{len(tool_results)} tool steps"
+                    )
+            except Exception as exc:
+                # Planner không được phép làm chết flow RAG
+                logger.warning(f"Planner lỗi, tiếp tục RAG thuần: {exc}")
+                tool_results = []
 
         contexts = self._retrieve_rerank(
             search_query, rag_mode, top_k, use_kg, allowed_sources, ce_threshold,
         )
 
-        if not contexts:
+        if not contexts and not tool_results:
             ans = Answer(
                 question=user_input,
                 answer=(
@@ -319,6 +352,7 @@ class LegalPipeline:
 
         return PipelinePrep(
             contexts=contexts,
+            tool_results=tool_results,
             state_context=conv_state.to_context_string(),
             llm_history=llm_history,
         )
@@ -425,9 +459,12 @@ class LegalPipeline:
 
     def guard(self, answer: Answer, prep: PipelinePrep) -> Answer:
         """Áp guardrails cho answer đã generate (chính sách chung mọi flow)."""
-        # Tool flow: kết quả tool là căn cứ → không cảnh báo "thiếu căn cứ"
+        # Tool flow: kết quả tool là căn cứ → không cảnh báo "thiếu căn cứ",
+        # và không kiểm chứng trích dẫn vs contexts (căn cứ nằm trong tool result)
         return apply_guardrails(
-            answer, prep.contexts, warn_no_evidence=not prep.tool_results,
+            answer, prep.contexts,
+            warn_no_evidence=not prep.tool_results,
+            verify_cited=not prep.tool_results,
         )
 
     def run(
@@ -441,12 +478,14 @@ class LegalPipeline:
         top_p: Optional[float] = None,
         ce_threshold: float = 0.04,
         llm_model: Optional[str] = None,
+        use_planner: bool = True,
     ) -> Answer:
         """Chạy toàn bộ pipeline (synchronous, non-streaming). Trả về Answer."""
         _t_total = time.time()
 
         prep = self.prepare(
             user_input, history, rag_mode, top_k, web_search_enabled, ce_threshold,
+            use_planner=use_planner,
         )
         if prep.final_answer is not None:
             logger.info(f"TOTAL {time.time()-_t_total:.2f}s (không cần generate)")

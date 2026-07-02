@@ -180,13 +180,13 @@ def _load_agent() -> None:
 
     ollama_client = generator.get_client()
 
-    # Wire HyDE vào retriever sau khi có LLM client
-    if config.USE_HYDE:
-        retriever.llm_client = ollama_client
-        retriever.hyde_model  = config.HYDE_MODEL
-        print(f"[API] HyDE         : BẬT (model={config.HYDE_MODEL})")
-    else:
-        print("[API] HyDE         : TẮT (set USE_HYDE=true để bật)")
+    # Wire LLM client vào retriever — HyDE + multi-query dùng fast model.
+    # Client luôn gắn; bật/tắt qua use_hyde/use_multi_query truyền từ pipeline.
+    retriever.llm_client = ollama_client
+    retriever.hyde_model = config.HYDE_MODEL
+    retriever.mq_model = config.MULTI_QUERY_MODEL
+    print(f"[API] HyDE         : {'BẬT (model=' + config.HYDE_MODEL + ')' if config.USE_HYDE else 'TẮT (set USE_HYDE=true để bật)'}")
+    print(f"[API] Multi-query  : {'BẬT (model=' + config.MULTI_QUERY_MODEL + ')' if config.USE_MULTI_QUERY else 'TẮT (set USE_MULTI_QUERY=true để bật)'}")
 
     tool_registry = LegalToolRegistry(
         retriever=retriever, ollama_client=ollama_client, model=config.LLM_MODEL,
@@ -200,6 +200,7 @@ def _load_agent() -> None:
         generator=generator,
         router=router,
         tool_registry=tool_registry,
+        planner=planner,
         top15_urls=top15_urls,
         export_link_base=config.API_BASE_URL,
     )
