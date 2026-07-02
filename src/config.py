@@ -67,6 +67,20 @@ HYDE_MODEL = os.getenv("HYDE_MODEL", ROUTER_MODEL)
 USE_MULTI_QUERY = os.getenv("USE_MULTI_QUERY", "false").lower() == "true"
 MULTI_QUERY_MODEL = os.getenv("MULTI_QUERY_MODEL", HYDE_MODEL)
 
+# ── Phễu rerank ───────────────────────────────────────────────────────────────
+# Retrieve pool RỘNG (max(top_k×MULT, MIN)) rồi CrossEncoder cắt về top_k.
+# Pool = top_k (cũ) làm CE chỉ đảo được thứ tự top_k chunk có sẵn — không bao
+# giờ cứu được chunk đúng ở hạng 8 (đo được: hit@5=0.82 vs hit@10=0.88).
+# Về hành vi cũ: RERANK_POOL_MULT=1, RERANK_POOL_MIN=0
+RERANK_POOL_MULT = int(os.getenv("RERANK_POOL_MULT", "4"))
+RERANK_POOL_MIN = int(os.getenv("RERANK_POOL_MIN", "20"))
+
+# ── Ngưỡng "không đủ căn cứ" ──────────────────────────────────────────────────
+# Khi CE đã chạy (score = sigmoid, chuẩn hóa), top score < ngưỡng → coi như
+# không tìm thấy căn cứ thay vì ép generator trả lời trên context nhiễu.
+# Mặc định 0 = TẮT — cần calibrate trên gold set (thêm câu ngoài-corpus) trước.
+MIN_EVIDENCE_SCORE = float(os.getenv("MIN_EVIDENCE_SCORE", "0"))
+
 # URL gốc của API server (dùng để tạo download link trong response)
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 

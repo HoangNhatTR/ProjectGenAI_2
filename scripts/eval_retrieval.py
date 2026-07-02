@@ -32,7 +32,7 @@ for _s in (sys.stdout, sys.stderr):
 
 from src import config
 from src.embedding import Embedder
-from src.reranker import rerank as _rerank
+from src.reranker import cap_per_doc, rerank as _rerank
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GOLD = ROOT / "tests" / "eval_retrieval_gold.json"
@@ -135,6 +135,10 @@ def main() -> None:
     p.add_argument("--hyde", action="store_true", help="Bật HyDE (cần LLM client)")
     p.add_argument("--multi-query", action="store_true",
                    help="Bật multi-query fusion — paraphrase + RRF gộp (cần LLM client)")
+    p.add_argument("--pool", type=int, default=-1,
+                   help="Phễu rerank: retrieve POOL ứng viên rồi CE cắt về top-k "
+                        "(mirror pipeline). -1 = auto max(K*4,20); 0 = TẮT phễu + "
+                        "per-doc cap (hành vi cũ, dùng làm baseline A/B)")
     p.add_argument("--ce-threshold", type=float, default=0.04,
                    help="Smart-skip CrossEncoder khi top RRF score ≥ ngưỡng (mirror pipeline)")
     p.add_argument("--tag", default=None, help="Lưu snapshot kết quả với tên này")
@@ -149,7 +153,8 @@ def main() -> None:
     if args.limit:
         questions = questions[:args.limit]
 
-    print(f"[eval] {len(questions)} câu | top-k={args.top_k} | "
+    pool = args.pool if args.pool >= 0 else max(args.top_k * 4, 20)
+    print(f"[eval] {len(questions)} câu | top-k={args.top_k} | pool={pool or 'TẮT'} | "
           f"backend={config.VECTOR_BACKEND} | kg={args.kg} hyde={args.hyde} "
           f"mq={args.multi_query}")
     retriever, vstore = build_retriever(args.kg)
@@ -177,10 +182,12 @@ def main() -> None:
 
         t0 = time.time()
         contexts = retriever.retrieve(
-            q["question"], top_k=K, use_kg=args.kg,
+            q["question"], top_k=(pool or K), use_kg=args.kg,
             use_hyde=args.hyde, use_parent_expansion=True,
             use_multi_query=args.multi_query,
         )
+        if pool:
+            contexts = cap_per_doc(contexts)
         if contexts:
             use_ce = contexts[0].score < args.ce_threshold
             contexts = _rerank(q["question"], contexts, top_k=K, use_cross_encoder=use_ce)

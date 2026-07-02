@@ -22,7 +22,7 @@ from . import config
 from .cache import RetrievalCache
 from .generator import Generator
 from .guardrails import apply_guardrails
-from .reranker import rerank as _rerank
+from .reranker import cap_per_doc, rerank as _rerank
 from .schemas import Answer
 from .state import ConversationState
 
@@ -228,20 +228,39 @@ class LegalPipeline:
             logger.info(f"Retrieve+rerank CACHE HIT — {len(cached)} chunks [{cache.stats_str()}]")
             return cached
 
+        # Phễu rerank: retrieve pool RỘNG rồi CE cắt về top_k. Pool = top_k (cũ)
+        # khiến CE chỉ đảo thứ tự chunk có sẵn, không cứu được chunk đúng hạng 8.
+        pool = max(top_k * config.RERANK_POOL_MULT, config.RERANK_POOL_MIN)
+
         _t0 = time.time()
         contexts = self.retriever.retrieve(
-            search_query, top_k=top_k, use_kg=use_kg, allowed_sources=allowed_sources,
+            search_query, top_k=pool, use_kg=use_kg, allowed_sources=allowed_sources,
             use_hyde=config.USE_HYDE, use_parent_expansion=True,
             use_multi_query=config.USE_MULTI_QUERY,
         )
-        logger.info(f"Retrieve {time.time()-_t0:.2f}s — {len(contexts)} chunks")
+        logger.info(f"Retrieve {time.time()-_t0:.2f}s — {len(contexts)} chunks (pool={pool})")
 
         if contexts:
+            # Per-doc cap: VB đồ sộ không được lấp kín pool bằng số đông chunk
+            contexts = cap_per_doc(contexts)
             _use_ce = contexts[0].score < ce_threshold
             contexts = _rerank(
                 search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce,
             )
             logger.info(f"Rerank CE={'on' if _use_ce else 'skip'} ({len(contexts)} chunks)")
+
+            # Ngưỡng "không đủ căn cứ" — chỉ khi CE chạy (score đã chuẩn hóa
+            # sigmoid). MIN_EVIDENCE_SCORE=0 (mặc định) = tắt, chờ calibrate.
+            if (
+                contexts and _use_ce
+                and config.MIN_EVIDENCE_SCORE > 0
+                and contexts[0].score < config.MIN_EVIDENCE_SCORE
+            ):
+                logger.info(
+                    f"Top score {contexts[0].score:.3f} < MIN_EVIDENCE_SCORE="
+                    f"{config.MIN_EVIDENCE_SCORE} → coi như không đủ căn cứ"
+                )
+                contexts = []
 
         cache.put(search_query, top_k, None, contexts, namespace=rag_mode)
         return contexts
