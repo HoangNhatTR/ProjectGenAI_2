@@ -133,6 +133,8 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--kg", action="store_true", help="Bật KG branch (cần Neo4j)")
     p.add_argument("--hyde", action="store_true", help="Bật HyDE (cần LLM client)")
+    p.add_argument("--multi-query", action="store_true",
+                   help="Bật multi-query fusion — paraphrase + RRF gộp (cần LLM client)")
     p.add_argument("--ce-threshold", type=float, default=0.04,
                    help="Smart-skip CrossEncoder khi top RRF score ≥ ngưỡng (mirror pipeline)")
     p.add_argument("--tag", default=None, help="Lưu snapshot kết quả với tên này")
@@ -148,8 +150,18 @@ def main() -> None:
         questions = questions[:args.limit]
 
     print(f"[eval] {len(questions)} câu | top-k={args.top_k} | "
-          f"backend={config.VECTOR_BACKEND} | kg={args.kg} hyde={args.hyde}")
+          f"backend={config.VECTOR_BACKEND} | kg={args.kg} hyde={args.hyde} "
+          f"mq={args.multi_query}")
     retriever, vstore = build_retriever(args.kg)
+
+    # HyDE / multi-query cần LLM client (fast model) — wire khi được yêu cầu
+    if args.hyde or args.multi_query:
+        from src.llm_client import create_client
+        from src.pipeline import provider_credentials
+        _key, _host = provider_credentials(config.LLM_PROVIDER)
+        retriever.llm_client = create_client(config.LLM_PROVIDER, _key, _host)
+        retriever.hyde_model = config.HYDE_MODEL
+        retriever.mq_model = config.MULTI_QUERY_MODEL
 
     K = args.top_k
     rows = []
@@ -167,6 +179,7 @@ def main() -> None:
         contexts = retriever.retrieve(
             q["question"], top_k=K, use_kg=args.kg,
             use_hyde=args.hyde, use_parent_expansion=True,
+            use_multi_query=args.multi_query,
         )
         if contexts:
             use_ce = contexts[0].score < args.ce_threshold

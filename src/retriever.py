@@ -50,6 +50,52 @@ _HYDE_PROMPT = (
     "Câu hỏi: {query}"
 )
 
+# ── Multi-query fusion (RAG-fusion) ────────────────────────────────────────────
+# Sinh N cách diễn đạt khác của câu hỏi → retrieve từng câu → RRF gộp giữa các
+# query. Giải đúng ca corpus phát biểu khác lời user: "vượt đèn đỏ" (user) vs
+# "không chấp hành hiệu lệnh của đèn tín hiệu" (NĐ 168) — 1 query đơn thua từ vựng.
+
+_MQ_PROMPT = (
+    "Viết lại câu hỏi pháp luật sau thành {n} cách diễn đạt khác nhau để tìm "
+    "văn bản pháp luật Việt Nam, dùng thuật ngữ pháp lý khác câu gốc "
+    "(ví dụ: 'vượt đèn đỏ' → 'không chấp hành hiệu lệnh của đèn tín hiệu giao thông'). "
+    "Mỗi cách trên 1 dòng, không đánh số, không giải thích.\n\n"
+    "Câu hỏi: {query}"
+)
+MQ_TIMEOUT_S = 8.0  # giây tối đa cho LLM sinh paraphrase
+MULTI_QUERY_N = int(os.getenv("MULTI_QUERY_N", "2"))  # số paraphrase (ngoài câu gốc)
+
+
+def _parse_paraphrases(raw: str, original: str, n: int) -> list[str]:
+    """Tách output LLM thành list paraphrase sạch (bỏ đánh số/bullet, trùng, quá ngắn)."""
+    out: list[str] = []
+    orig_norm = original.strip().lower()
+    for line in (raw or "").splitlines():
+        line = re.sub(r"^[\s\-•*]+", "", line.strip())
+        line = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+        if len(line) < 8 or line.lower() == orig_norm:
+            continue
+        if line not in out:
+            out.append(line)
+        if len(out) >= n:
+            break
+    return out
+
+
+def _fuse_ranked_lists(
+    lists: list[list[RetrievedChunk]], top_k: int, k: int = DEFAULT_RRF_K,
+) -> list[RetrievedChunk]:
+    """RRF gộp nhiều danh sách đã xếp hạng (fusion GIỮA các query, không phải branch)."""
+    scores: dict[str, float] = {}
+    chunks_by_id: dict = {}
+    for lst in lists:
+        for rank, r in enumerate(lst):
+            cid = r.chunk.chunk_id
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+            chunks_by_id.setdefault(cid, r.chunk)
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:top_k]
+    return [RetrievedChunk(chunk=chunks_by_id[cid], score=s) for cid, s in ranked]
+
 
 class Retriever:
     """Tầng trên VectorStore. Hybrid: vector + BM25 + KG → RRF fusion (3 branches).
@@ -75,6 +121,7 @@ class Retriever:
         parent_store: Optional["ParentStore"] = None,
         llm_client: Optional[Any] = None,
         hyde_model: Optional[str] = None,
+        mq_model: Optional[str] = None,
     ):
         self.embedder = embedder
         self.store = store
@@ -84,6 +131,8 @@ class Retriever:
         self.parent_store = parent_store
         self.llm_client = llm_client
         self.hyde_model = hyde_model
+        # Model sinh paraphrase cho multi-query fusion (fallback: hyde_model)
+        self.mq_model = mq_model
         # Persistent executor — tránh tạo/hủy thread pool trên mỗi query
         self._kg_executor = ThreadPoolExecutor(max_workers=1)
         self._hyde_executor = ThreadPoolExecutor(max_workers=1)
@@ -106,6 +155,7 @@ class Retriever:
         use_hyde: bool = False,
         use_parent_expansion: bool = True,
         rrf_k: Optional[int] = None,
+        use_multi_query: bool = False,
     ) -> list[RetrievedChunk]:
         """Lấy top-k chunks liên quan tới query.
 
@@ -122,9 +172,22 @@ class Retriever:
                       Chỉ hoạt động khi parent_store được set.
             rrf_k: override smoothing constant RRF cho riêng query này
                       (không mutate self.rrf_k — an toàn khi dùng chung instance).
+            use_multi_query: True → RAG-fusion: sinh paraphrase + RRF gộp giữa
+                      các query. Cần llm_client; tốn +1 LLM call + N lần retrieve.
         """
         if not query.strip():
             return []
+
+        # ── Multi-query fusion: câu đã chứa trích dẫn cụ thể (Điều/số hiệu VB)
+        # thì retrieval vốn chính xác → khỏi paraphrase (cùng gate với HyDE)
+        if use_multi_query and self.llm_client is not None and _hyde_worth_it(query):
+            fused = self._retrieve_multi(
+                query, top_k, filters=filters, min_score=min_score, use_kg=use_kg,
+                allowed_sources=allowed_sources, use_hyde=use_hyde,
+                use_parent_expansion=use_parent_expansion, rrf_k=rrf_k,
+            )
+            if fused is not None:
+                return fused
 
         # Build composite filter cho vector branch
         vec_filter = filters
@@ -281,6 +344,71 @@ class Retriever:
             added.append(RetrievedChunk(chunk=chunks[0], score=min_score * 0.5))
 
         return (base + added)[:top_k]
+
+    # ── Multi-query fusion ─────────────────────────────────────────────────────
+
+    def _paraphrase_queries(self, query: str, n: int) -> list[str]:
+        """Sinh n cách diễn đạt khác của query bằng fast model (timeout cứng)."""
+        model = self.mq_model or self.hyde_model
+        if self.llm_client is None or not model:
+            return []
+
+        def _call() -> str:
+            response = self.llm_client.chat(
+                model=model,
+                messages=[{"role": "user", "content": _MQ_PROMPT.format(n=n, query=query)}],
+                options={"temperature": 0.4, "num_ctx": 512},
+            )
+            return response["message"]["content"]
+
+        try:
+            raw = self._hyde_executor.submit(_call).result(timeout=MQ_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning(f"Multi-query paraphrase lỗi/timeout, retrieve thường: {exc}")
+            return []
+        return _parse_paraphrases(raw, query, n)
+
+    def _retrieve_multi(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        filters: Optional[dict],
+        min_score: Optional[float],
+        use_kg: bool,
+        allowed_sources: Optional[list[str]],
+        use_hyde: bool,
+        use_parent_expansion: bool,
+        rrf_k: Optional[int],
+    ) -> Optional[list[RetrievedChunk]]:
+        """RAG-fusion: retrieve câu gốc + paraphrases → RRF gộp GIỮA các query.
+
+        Trả None khi không sinh được paraphrase → caller fallback retrieve thường.
+        Paraphrase chạy KHÔNG KG (KG bám keyword câu gốc là đủ, đỡ N lần Neo4j)
+        và không parent expansion (expand 1 lần SAU khi fuse — expand trước sẽ
+        dedup theo parent_id làm lệch rank giữa các list).
+        """
+        paraphrases = self._paraphrase_queries(query, MULTI_QUERY_N)
+        if not paraphrases:
+            return None
+        logger.info(f"Multi-query: +{len(paraphrases)} paraphrase → RRF fusion")
+
+        common: dict[str, Any] = dict(
+            filters=filters, min_score=min_score, allowed_sources=allowed_sources,
+            use_multi_query=False, use_parent_expansion=False, rrf_k=rrf_k,
+        )
+        lists = [
+            self.retrieve(query, top_k=top_k, use_kg=use_kg, use_hyde=use_hyde, **common)
+        ]
+        for pq in paraphrases:
+            lists.append(
+                self.retrieve(pq, top_k=top_k, use_kg=False, use_hyde=False, **common)
+            )
+
+        fused = _fuse_ranked_lists(lists, top_k, k=rrf_k if rrf_k is not None else self.rrf_k)
+        if use_parent_expansion and self.parent_store:
+            fused = self._expand_to_parents(fused)
+        return fused
 
     # ── HyDE ───────────────────────────────────────────────────────────────────
 

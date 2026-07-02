@@ -59,6 +59,14 @@ PARENT_STORE_PATH = PROCESSED_DIR / "parent_store.db"
 USE_HYDE = os.getenv("USE_HYDE", "false").lower() == "true"
 HYDE_MODEL = os.getenv("HYDE_MODEL", ROUTER_MODEL)
 
+# ── Multi-Query fusion (RAG-fusion) ───────────────────────────────────────────
+# True: sinh MULTI_QUERY_N cách diễn đạt khác của câu hỏi (fast model) → retrieve
+# từng câu → RRF gộp. Tăng recall khi corpus phát biểu khác lời user ("vượt đèn
+# đỏ" vs "không chấp hành hiệu lệnh đèn tín hiệu"). Tốn +1 LLM call + N lần
+# retrieve/câu hỏi → mặc định TẮT; bật rồi ĐO bằng scripts.eval_retrieval trước.
+USE_MULTI_QUERY = os.getenv("USE_MULTI_QUERY", "false").lower() == "true"
+MULTI_QUERY_MODEL = os.getenv("MULTI_QUERY_MODEL", HYDE_MODEL)
+
 # URL gốc của API server (dùng để tạo download link trong response)
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
