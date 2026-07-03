@@ -27,6 +27,7 @@ uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Kiểm tra hoạt động:
+
 ```
 http://localhost:8000/           → health check
 http://localhost:8000/v1/models  → danh sách models
@@ -50,6 +51,7 @@ npm install
 ```
 
 Tạo file `.env.local`:
+
 ```env
 # Trỏ vào FastAPI local thay vì api.openai.com
 OPENAI_API_KEY=legal-ai-local
@@ -70,11 +72,13 @@ npm install
 ```
 
 Cần tạo project Supabase tại https://supabase.com và lấy:
+
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
 Tạo `.env.local`:
+
 ```env
 # Supabase
 NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
@@ -90,6 +94,7 @@ OPENAI_ORGANIZATION=
 ```
 
 Chạy Supabase migration:
+
 ```bash
 npx supabase db push
 ```
@@ -104,12 +109,12 @@ npm run dev
 
 Trong giao diện, chọn model:
 
-| Model name | Chế độ RAG |
-|---|---|
+| Model name         | Chế độ RAG                       |
+| ------------------ | ----------------------------------- |
 | `legal-ai-graph` | Graph-RAG (tốt nhất, mặc định) |
-| `legal-ai-top15` | RAG chỉ top 15 luật (nhanh hơn) |
-| `legal-ai-full` | RAG toàn bộ 609 luật |
-| `legal-ai` | Alias của graph |
+| `legal-ai-top15` | RAG chỉ top 15 luật (nhanh hơn)  |
+| `legal-ai-full`  | RAG toàn bộ 609 luật             |
+| `legal-ai`       | Alias của graph                    |
 
 ---
 
@@ -140,6 +145,7 @@ curl http://localhost:8000/v1/chat/completions \
 ## Thay thế khác (dễ hơn, không cần Node.js)
 
 ### Open WebUI với Docker
+
 ```bash
 docker run -d \
   -p 3000:8080 \
@@ -148,9 +154,11 @@ docker run -d \
   --name open-webui \
   ghcr.io/open-webui/open-webui:main
 ```
+
 → Mở http://localhost:3000 — giao diện ChatGPT, tự động nhận models từ `/v1/models`
 
 ### LibreChat
+
 ```bash
 git clone https://github.com/danny-avila/LibreChat.git
 cd LibreChat
@@ -160,6 +168,7 @@ cp .env.example .env
 # OPENAI_REVERSE_PROXY=http://localhost:8000/v1
 docker compose up
 ```
+
 → Mở http://localhost:3080
 
 ---
