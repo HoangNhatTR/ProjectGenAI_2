@@ -290,6 +290,10 @@ class ChatCompletionRequest(BaseModel):
     # search_query: truy vấn retrieve riêng (gọn, đích danh) khi prompt dài.
     skip_router: bool = False
     search_query: Optional[str] = None
+    # Long-term memory + rolling summary — CLIENT tự lưu (server stateless)
+    # và gửi kèm mỗi request; sinh mới qua /v1/memory/extract + /v1/memory/summarize
+    memory_text: str = ""
+    summary_text: str = ""
 
 
 class OAIDelta(BaseModel):
@@ -495,6 +499,67 @@ async def retrieve_only(req: RetrieveRequest, authorization: Optional[str] = Hea
     }
 
 
+# ── Memory endpoints — client-carry (server stateless) ───────────────────────
+# Long-term memory + rolling summary trước đây chỉ sống ở CLI/Streamlit
+# (MemoryStore/Session phía server). Đường API để client tự lưu: sau mỗi lượt
+# frontend gọi 2 endpoint này để SINH facts/summary, tự cất (localStorage/
+# Zustand) rồi gửi kèm memory_text/summary_text ở các request sau.
+
+class MemoryExtractRequest(BaseModel):
+    question: str
+    answer: str
+    llm_model: Optional[str] = None  # None → LLM mặc định
+
+
+class MemorySummarizeRequest(BaseModel):
+    messages: list[OAIMessage]  # các message CŨ cần nén (client tự cắt)
+    prev_summary: str = ""
+    llm_model: Optional[str] = None
+
+
+@app.post("/v1/memory/extract")
+async def memory_extract(
+    req: MemoryExtractRequest, authorization: Optional[str] = Header(None),
+):
+    """Bóc facts mới về NGƯỜI DÙNG từ 1 lượt hỏi-đáp (extract_memory_facts).
+
+    Không bao giờ lỗi cứng: LLM hỏng → facts=[] (client cứ giữ memory cũ).
+    """
+    _require_auth(authorization)
+    pipeline: LegalPipeline = _agent.get("pipeline")
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+    gen = pipeline.make_generator(llm_model=req.llm_model)
+    facts = await asyncio.get_event_loop().run_in_executor(
+        None, gen.extract_memory_facts, req.question, req.answer,
+    )
+    return {"facts": facts}
+
+
+@app.post("/v1/memory/summarize")
+async def memory_summarize(
+    req: MemorySummarizeRequest, authorization: Optional[str] = Header(None),
+):
+    """Nén các message cũ thành rolling summary (summarize_history).
+
+    Client giữ con trỏ summary_until riêng; lỗi LLM → trả lại prev_summary.
+    """
+    _require_auth(authorization)
+    pipeline: LegalPipeline = _agent.get("pipeline")
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="Pipeline chưa sẵn sàng")
+    gen = pipeline.make_generator(llm_model=req.llm_model)
+    summary = await asyncio.get_event_loop().run_in_executor(
+        None,
+        functools.partial(
+            gen.summarize_history,
+            messages=[m.model_dump() for m in req.messages],
+            prev_summary=req.prev_summary,
+        ),
+    )
+    return {"summary": summary}
+
+
 # Đường dẫn tuyệt đối theo config — không phụ thuộc CWD lúc chạy uvicorn
 _EXPORT_DIR = config.DATA_DIR / "exports"
 
@@ -558,6 +623,8 @@ async def chat_completions(
                 llm_model=_llm_model,
                 skip_router=request.skip_router,
                 search_query=request.search_query,
+                memory_text=request.memory_text,
+                summary_text=request.summary_text,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -570,6 +637,7 @@ async def chat_completions(
                 _top_k, request.web_search,
                 _temperature, _top_p, _ce_thresh, _llm_model,
                 request.skip_router, request.search_query,
+                request.memory_text, request.summary_text,
             ),
         )
         full_text = _format_answer(answer)
@@ -598,6 +666,8 @@ def _run_pipeline(
     llm_model: Optional[str] = None,
     skip_router: bool = False,
     search_query: Optional[str] = None,
+    memory_text: str = "",
+    summary_text: str = "",
 ) -> Answer:
     """Wrapper mỏng quanh LegalPipeline.run (logic chung ở src/pipeline.py)."""
     return _agent["pipeline"].run(
@@ -606,6 +676,7 @@ def _run_pipeline(
         temperature=temperature, top_p=top_p,
         ce_threshold=ce_threshold, llm_model=llm_model,
         skip_router=skip_router, search_query=search_query,
+        memory_text=memory_text, summary_text=summary_text,
     )
 
 
@@ -682,6 +753,8 @@ async def _stream_pipeline(
     llm_model: Optional[str] = None,
     skip_router: bool = False,
     search_query: Optional[str] = None,
+    memory_text: str = "",
+    summary_text: str = "",
 ) -> AsyncIterator[str]:
     """Generator SSE — retrieve trong thread pool, sau đó stream THẬT từ LLM.
 
@@ -731,6 +804,7 @@ async def _stream_pipeline(
                 pipeline.prepare, user_input, history, rag_mode,
                 top_k, web_search_enabled, ce_threshold,
                 skip_router=skip_router, search_query=search_query,
+                memory_text=memory_text, summary_text=summary_text,
             ),
         )
     except Exception as e:
@@ -756,6 +830,7 @@ async def _stream_pipeline(
         try:
             for chunk in generator.stream_generate(
                 user_input, prep.contexts, history=prep.llm_history,
+                memory_text=memory_text, summary_text=summary_text,
                 tool_results=prep.tool_results or None,
                 state_context=prep.state_context,
             ):

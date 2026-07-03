@@ -278,6 +278,8 @@ class LegalPipeline:
         use_planner: bool = True,
         skip_router: bool = False,
         search_query: Optional[str] = None,
+        memory_text: str = "",
+        summary_text: str = "",
     ) -> PipelinePrep:
         """Router → tool → (planner) → retrieve → rerank (synchronous, chưa generate).
 
@@ -289,6 +291,10 @@ class LegalPipeline:
         search_query (chỉ dùng với skip_router): truy vấn RETRIEVE riêng —
         caller máy biết chính xác cần tìm gì (vd "khung hình phạt điểm c khoản 1
         Điều 250"), còn prompt generate có thể dài đầy hướng dẫn.
+
+        memory_text/summary_text: long-term memory (facts về user) + rolling
+        summary — CLIENT tự lưu và gửi kèm (server stateless). Trước đây 2 lớp
+        này chỉ sống ở CLI/Streamlit, đường API bị hardcode chuỗi rỗng.
         """
         mode_cfg = RETRIEVAL_MODES.get(rag_mode, RETRIEVAL_MODES["graph_rag"])
         use_kg = mode_cfg["use_kg"]
@@ -335,7 +341,7 @@ class LegalPipeline:
         _t0 = time.time()
         decision = self.router.route(
             user_input, history=llm_history,
-            memory_text="", summary_text="",
+            memory_text=memory_text, summary_text=summary_text,
             state=conv_state,
             web_search_enabled=web_search_enabled,
         )
@@ -538,6 +544,8 @@ class LegalPipeline:
         use_planner: bool = True,
         skip_router: bool = False,
         search_query: Optional[str] = None,
+        memory_text: str = "",
+        summary_text: str = "",
     ) -> Answer:
         """Chạy toàn bộ pipeline (synchronous, non-streaming). Trả về Answer."""
         _t_total = time.time()
@@ -545,6 +553,7 @@ class LegalPipeline:
         prep = self.prepare(
             user_input, history, rag_mode, top_k, web_search_enabled, ce_threshold,
             use_planner=use_planner, skip_router=skip_router, search_query=search_query,
+            memory_text=memory_text, summary_text=summary_text,
         )
         if prep.final_answer is not None:
             logger.info(f"TOTAL {time.time()-_t_total:.2f}s (không cần generate)")
@@ -555,6 +564,7 @@ class LegalPipeline:
         _t0 = time.time()
         answer = generator.generate(
             user_input, prep.contexts, history=prep.llm_history,
+            memory_text=memory_text, summary_text=summary_text,
             tool_results=prep.tool_results or None,
             state_context=prep.state_context,
         )
