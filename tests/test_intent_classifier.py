@@ -84,6 +84,85 @@ def test_has_validation_target_helper():
     assert has_validation_target("phân tích giúp", [{"role": "system", "content": "file: a.pdf"}]) is True
 
 
+# ── Follow-up gate (cần has_history) ──────────────────────────────────────────
+
+def test_followup_anaphora_khi_co_history():
+    c = IntentClassifier(embedder=None)
+    # Đúng ca bug thật: "thế nếu ô tô vượt thì sao ?" từng bị retrieve nguyên văn
+    r = c.classify("thế nếu ô tô vượt thì sao ?", has_history=True)
+    assert r.intent == "followup" and r.needs_llm_query
+
+
+def test_followup_cau_ngan_khi_co_history():
+    c = IntentClassifier(embedder=None)
+    # Câu ngắn elliptical (26 ký tự) — không tự chứa chủ đề
+    r = c.classify("tôi vượt ở nút giao thông", has_history=True)
+    assert r.intent == "followup" and r.needs_llm_query
+
+
+def test_khong_followup_khi_khong_co_history():
+    c = IntentClassifier(embedder=None)
+    # Lượt ĐẦU hội thoại: câu y hệt không được ra followup (không có gì để rewrite)
+    r = c.classify("thế nếu ô tô vượt thì sao ?", has_history=False)
+    assert r.intent != "followup"
+
+
+def test_cau_dai_tu_dung_khong_followup_du_co_history():
+    c = IntentClassifier(embedder=None)
+    q = "Người điều khiển xe ô tô vượt đèn đỏ tại nút giao thông thì bị phạt bao nhiêu tiền"
+    r = c.classify(q, has_history=True)
+    assert r.intent != "followup"
+
+
+def test_followup_khong_nuot_rule_nguy_hiem():
+    c = IntentClassifier(embedder=None)
+    # Câu ngắn + history nhưng khớp rule validate/compare → rule thắng
+    r1 = c.classify("phân tích bản án này", has_history=True)
+    assert r1.intent == "validate"
+    r2 = c.classify("so sánh với ô tô thì sao", has_history=True)
+    assert r2.intent == "compare"
+
+
+def test_router_followup_rewrite_chuyen_dung():
+    """Follow-up → LLM chuyên dụng viết lại (text thuần) → retrieve query độc lập."""
+    clf = IntentClassifier(embedder=None)
+    r = SmartRouter(model="fake", classifier=clf)
+
+    class _RewriteLLM:
+        # _rewrite_followup gọi chat KHÔNG format=json → trả text thuần
+        def chat(self, *a, **k):
+            return {"message": {"content": "ô tô vượt đèn đỏ bị phạt bao nhiêu tiền"}}
+
+    r._client = _RewriteLLM()
+    d = r.route(
+        "thế nếu ô tô vượt thì sao ?",
+        history=[
+            {"role": "user", "content": "Vượt đèn đỏ với xe máy bị phạt bao nhiêu tiền?"},
+            {"role": "assistant", "content": "Mức phạt 4-6 triệu đồng theo NĐ 168/2024."},
+        ],
+    )
+    assert d.action == "retrieve" and d.intent == "followup"
+    assert d.search_query == "ô tô vượt đèn đỏ bị phạt bao nhiêu tiền"
+    assert d.raw == "followup_rewrite"
+
+
+def test_router_followup_rewrite_loi_dung_cau_goc():
+    """LLM rewrite lỗi → dùng câu gốc (KHÔNG đổi sang tool, KHÔNG crash)."""
+    clf = IntentClassifier(embedder=None)
+    r = SmartRouter(model="fake", classifier=clf)
+
+    class _BrokenLLM:
+        def chat(self, *a, **k):
+            raise RuntimeError("LLM down")
+
+    r._client = _BrokenLLM()
+    d = r.route("thế đối với ô tô thì sao ?",
+                history=[{"role": "user", "content": "xe máy vượt đèn đỏ phạt bao nhiêu?"},
+                         {"role": "assistant", "content": "4-6 triệu."}])
+    assert d.action == "retrieve" and d.intent == "followup"
+    assert d.search_query == "thế đối với ô tô thì sao ?"  # fallback câu gốc
+
+
 # ── Embedding gate (FakeEmbedder) ─────────────────────────────────────────────
 
 class _FakeEmbedder:
@@ -149,3 +228,23 @@ def test_router_guard_giu_validate_khi_co_van_ban():
     r._client = _ValidateLLM()
     d = r.route("phân tích văn bản này", history=[{"role": "system", "content": "file: ban_an.pdf"}])
     assert d.action == "use_tool" and d.tool_name == "validate_document"
+
+
+def test_router_followup_khong_bao_gio_ra_tool():
+    """Dù LLM nền có xu hướng compare, follow-up ĐI ĐƯỜNG rewrite chuyên dụng
+    (text thuần) nên KHÔNG bao giờ ra use_tool/compare."""
+    clf = IntentClassifier(embedder=None)
+    r = SmartRouter(model="fake", classifier=clf)
+
+    class _TextLLM:
+        def chat(self, *a, **k):
+            # _rewrite_followup gọi không format=json → trả text độc lập
+            return {"message": {"content": "ô tô vượt đèn đỏ bị phạt bao nhiêu tiền"}}
+
+    r._client = _TextLLM()
+    d = r.route("thế đối với ô tô thì sao ?",
+                history=[{"role": "user", "content": "xe máy vượt đèn đỏ thì bị phạt như thế nào?"},
+                         {"role": "assistant", "content": "Phạt 4-6 triệu theo NĐ 168/2024."}])
+    assert d.action == "retrieve" and d.intent == "followup"
+    assert d.tool_name is None
+    assert "ô tô" in (d.search_query or "").lower()

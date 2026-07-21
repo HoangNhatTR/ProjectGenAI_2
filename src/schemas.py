@@ -51,9 +51,32 @@ class Citation(BaseModel):
     clause: Optional[str] = None
     point: Optional[str] = None
     snippet: str
+    # Chỉ số [n] LLM dùng trong thân bài (1-based theo thứ tự contexts).
+    # Block "📚 Nguồn pháp lý" phải in đúng số này — đánh số lại từ 1 làm
+    # UI tra map thất bại khi LLM chỉ trích [3], [5].
+    ref: Optional[int] = None
+    # Tên văn bản (metadata.title) — UI hiển thị header popup trích dẫn
+    title: Optional[str] = None
+
+
+class ConfidenceInfo(BaseModel):
+    """Nhãn độ tin cậy (P2.3) — tính từ tín hiệu retrieval TẤT ĐỊNH (xem
+    src/confidence.py), KHÔNG phải LLM tự chấm. reasons_vi luôn có giá trị
+    (kể cả khi label='cao' — giải thích vì sao tin cậy cao)."""
+
+    label: str = Field(description="'cao' | 'trung_binh' | 'thap'")
+    label_vi: str = Field(description="'Cao' | 'Trung bình' | 'Thấp'")
+    reasons_vi: list[str] = Field(default_factory=list)
+    # Tín hiệu thô — không bắt buộc hiển thị UI, dùng để debug/calibrate
+    # (xem scripts/eval_confidence.py).
+    top1_score: float = 0.0
+    n_sources: int = 0
+    citation_pass_rate: float = 0.0
+    has_expired_source: bool = False
 
 
 class Answer(BaseModel):
     question: str
     answer: str
     citations: list[Citation] = Field(default_factory=list)
+    confidence: Optional[ConfidenceInfo] = None

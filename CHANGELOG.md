@@ -2,6 +2,47 @@
 
 ---
 
+## Citation refs + Latency — 2026-07-07
+
+### Sửa lỗi trích dẫn (popup UI trống)
+
+Thân bài LLM trích `[3]`, `[5]` theo số thứ tự context, nhưng block
+"📚 Nguồn pháp lý" đánh số lại từ `[1]` → UI (legal-chat-ui) tra map thất bại,
+popup chỉ hiện "Nguồn 5".
+
+- `src/schemas.py` — `Citation` thêm `ref` (số [n] trong thân bài) + `title`
+- `src/generator.py` — gom `_build_citations()` dùng chung cho generate/stream,
+  gắn `ref` = index gốc 1-based của context
+- `api.py` — `_format_citations` in `[ref]` thay vì đánh số lại
+
+### Popup trích dẫn hiện TOÀN VĂN điều luật
+
+Backend gửi thêm citations structured (field `legal_citations` — toàn văn đoạn
+trích, giữ xuống dòng) trong SSE chunk cuối stream + response non-stream
+(client OpenAI chuẩn bỏ qua field lạ). Block text "📚 Nguồn pháp lý" rút gọn
+snippet về 240 ký tự cho gọn (toàn văn nằm ở popup).
+
+- `api.py` — `_citations_payload()` + `_citations_chunk()` (stream) +
+  `ChatCompletionResponse.legal_citations` (non-stream)
+- `legal-chat-ui` — `types.ts` (`LegalCitation`, `Message.citations`),
+  `api.ts` (callback `onCitations`), `store.ts` (`setAssistantCitations`),
+  `InputBox.tsx` (wire), `MessageItem.tsx` (popup: tên văn bản + chip
+  Điều/Khoản + toàn văn `whitespace-pre-wrap`, cuộn max-h-72; fallback parse
+  block text cho message cũ)
+
+### Giảm latency
+
+- `src/pipeline.py` — `_retrieve_rerank`: parent expansion chuyển ra SAU rerank.
+  CrossEncoder chấm child chunk ~600 ký tự thay vì full Điều đã expand (hàng
+  nghìn ký tự) — khâu từng tốn 1.5–5s/câu trên CPU. Rerank cả pool → expand
+  (dedup theo Điều) → cắt top_k nên vẫn đủ top_k Điều phân biệt.
+- `src/reranker.py` — `CE_MAX_CHARS` (mặc định 2000): chặn text quá dài vào CE,
+  lưới an toàn cho caller khác (app.py/ui_app.py vẫn expand trước rerank)
+- `api.py` — warmup nền lúc khởi động: preload CrossEncoder (~8s) + embedder,
+  query đầu tiên không còn trả giá load model (đo được rerank đầu tốn 20s+)
+
+---
+
 ## Data Supplement — 2026-06-10
 
 ### Dữ liệu mới

@@ -83,8 +83,12 @@ def test_ket_qua_cuoi_van_cat_ve_top_k():
     assert len(prep.contexts) == 5
 
 
-def test_per_doc_cap_da_dang_hoa_pool():
-    """6 chunk cùng 1 VB + 1 VB khác → cap 3/VB nên VB kia phải lọt top-5."""
+def test_per_doc_cap_da_dang_hoa_pool(monkeypatch):
+    """6 chunk cùng 1 VB + 1 VB khác → cap 3/VB nên VB kia phải lọt top-5.
+
+    Pin cap=3 — .env production có thể override PER_DOC_CAP (2026-07-08: 5)."""
+    import src.reranker as _rr
+    monkeypatch.setattr(_rr, "PER_DOC_CAP", 3)
     chunks = [_rc(f"a{i}", source="https://vbpl.vn/to") for i in range(6)]
     chunks.append(_rc("b0", source="https://vbpl.vn/nd168"))
     retriever = _StubRetriever(chunks)

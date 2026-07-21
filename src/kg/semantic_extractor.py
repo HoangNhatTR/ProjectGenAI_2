@@ -158,6 +158,7 @@ _TRANSIENT_KEYWORDS = (
     "connection aborted",
     "remote disconnect",
     "read timeout",
+    "empty response",   # Router9Client: choices=None flaky (vd oc/nemotron-3-ultra-free)
 )
 
 
@@ -224,6 +225,11 @@ def is_rate_limited(error_msg: str, exc: Optional[Exception] = None) -> bool:
 
     HTTP 429 từ exception attributes là tín hiệu chắc chắn nhất.
     """
+    msg = error_msg.lower()
+    # MiMo (mmf/*) trả HTTP 400 code 441 "risk_control" khi request dồn dập —
+    # bản chất là rate limit đội lốt 400, phải backoff chứ không fail điều.
+    if "risk_control" in msg or '"code": "441"' in msg:
+        return True
     if exc is not None:
         status = _get_http_status(exc)
         if status == 429:
@@ -231,7 +237,6 @@ def is_rate_limited(error_msg: str, exc: Optional[Exception] = None) -> bool:
         # Status code rõ ràng, không phải 429 → không phải rate limit
         if status is not None and status not in (429, 500, 502, 503, 504):
             return False
-    msg = error_msg.lower()
     return any(kw in msg for kw in _RATE_LIMIT_KEYWORDS)
 
 

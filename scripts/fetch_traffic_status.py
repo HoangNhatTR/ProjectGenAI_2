@@ -18,7 +18,12 @@ from src.vbpl_client import VBPLClient
 
 client = VBPLClient()
 TARGETS = ["100/2019/NĐ-CP", "123/2021/NĐ-CP", "152/2005/NĐ-CP", "34/2010/NĐ-CP",
-           "19/VBHN-BGTVT", "03/VBHN-BGTVT", "10/VBHN-BGTVT"]
+           "19/VBHN-BGTVT", "03/VBHN-BGTVT", "10/VBHN-BGTVT",
+           # Đợt 2 (2026-07-08): NĐ phạt GT cổ vẫn đè pool retrieval — đo thấy
+           # chiếm 17/20 slot thô cho query đèn tín hiệu (49-CP xếp trên NĐ 168)
+           "49-CP", "78/1998/NĐ-CP", "39/2001/NĐ-CP", "15/2003/NĐ-CP",
+           "146/2007/NĐ-CP", "71/2012/NĐ-CP", "171/2013/NĐ-CP", "107/2014/NĐ-CP",
+           "46/2016/NĐ-CP", "60/2011/NĐ-CP", "93/2013/NĐ-CP"]
 
 for dn in TARGETS:
     # search theo số hiệu — kết quả search đã có effStatus (không cần fetch content)

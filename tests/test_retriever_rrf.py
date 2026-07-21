@@ -112,3 +112,19 @@ def test_rrf_score_cong_don_dung_cong_thuc():
         rrf_k=60,
     )
     assert abs(out[0].score - 2 / 61) < 1e-9
+
+
+# ── Rule-based legal synonym expansion (2026-07-08) ──────────────────────────
+
+def test_rule_expand_xe_may_va_den_do():
+    from src.retriever import _rule_expand
+    out = _rule_expand("Xe máy vượt đèn đỏ thì bị phạt bao nhiêu tiền ?")
+    assert out is not None
+    assert "xe mô tô, xe gắn máy" in out
+    assert "không chấp hành hiệu lệnh của đèn tín hiệu giao thông" in out
+    assert "vượt đèn đỏ" not in out.lower()
+
+
+def test_rule_expand_khong_co_gi_de_thay():
+    from src.retriever import _rule_expand
+    assert _rule_expand("thủ tục ly hôn đơn phương cần giấy tờ gì") is None

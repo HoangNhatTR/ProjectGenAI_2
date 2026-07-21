@@ -55,6 +55,7 @@ from src.generator import Generator
 from src.parent_store import ParentStore
 from src.planner import LegalPlanner
 from src.pipeline import LegalPipeline, RETRIEVAL_MODES, provider_credentials
+from src.query_log import log_query
 from src.retriever import Retriever
 from src.router import SmartRouter
 from src.schemas import Answer
@@ -220,6 +221,30 @@ def _load_agent() -> None:
 
     print(f"[API] Sẵn sàng — {vstore.count():,} chunks, KG={'✓' if kg_retriever else '✗'}")
 
+    # Warmup nền: query ĐẦU TIÊN sau restart từng tốn ~100s (đo 2026-07-08:
+    # Router 30s + CE 51s) vì 3 chi phí lazy: load CE, encode prototypes
+    # classifier, và lần predict CE đầu (kernel warm-up). Dồn hết vào đây.
+    def _warmup() -> None:
+        try:
+            from src.reranker import preload as _preload_ce, rerank as _warm_rerank
+            from src.schemas import Chunk, DocumentMetadata, RetrievedChunk
+            _preload_ce()
+            embedder.encode(["khởi động"])
+            # Encode prototypes intent classifier (lazy ở lần classify đầu)
+            _intent_clf.classify("mức phạt vượt đèn đỏ xe máy là bao nhiêu")
+            # 1 lần predict CE thật — warm kernel (predict đầu tốn 20-50s)
+            _dummy = [RetrievedChunk(
+                chunk=Chunk(chunk_id="warmup", text="Điều 1. Phạt tiền từ 100.000 đồng.",
+                            metadata=DocumentMetadata(source="warmup")),
+                score=0.0,
+            )]
+            _warm_rerank("khởi động hệ thống", _dummy, use_cross_encoder=True)
+            print("[API] Warmup xong — CrossEncoder + embedder + classifier sẵn sàng.")
+        except Exception as e:
+            print(f"[API] Warmup lỗi (bỏ qua): {e}")
+
+    threading.Thread(target=_warmup, daemon=True, name="model-warmup").start()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -290,6 +315,10 @@ class ChatCompletionRequest(BaseModel):
     # search_query: truy vấn retrieve riêng (gọn, đích danh) khi prompt dài.
     skip_router: bool = False
     search_query: Optional[str] = None
+    # no_retrieval: tác vụ KHÔNG cần tra kho luật (vd trích xuất thuần từ tài
+    # liệu đã có trong prompt) — bỏ hẳn bước retrieve+rerank thay vì chỉ rút
+    # gọn search_query. Chỉ có tác dụng khi skip_router=True.
+    no_retrieval: bool = False
     # Long-term memory + rolling summary — CLIENT tự lưu (server stateless)
     # và gửi kèm mỗi request; sinh mới qua /v1/memory/extract + /v1/memory/summarize
     memory_text: str = ""
@@ -321,6 +350,10 @@ class ChatCompletionResponse(BaseModel):
     model: str = "legal-ai-graph"
     choices: list[OAIChoice]
     usage: OAIUsage = Field(default_factory=OAIUsage)
+    # Citations structured (toàn văn đoạn trích) — client OpenAI chuẩn bỏ qua
+    legal_citations: Optional[list[dict]] = None
+    # Nhãn độ tin cậy (P2.3, src/confidence.py) — client OpenAI chuẩn bỏ qua
+    confidence: Optional[dict] = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -623,6 +656,7 @@ async def chat_completions(
                 llm_model=_llm_model,
                 skip_router=request.skip_router,
                 search_query=request.search_query,
+                no_retrieval=request.no_retrieval,
                 memory_text=request.memory_text,
                 summary_text=request.summary_text,
             ),
@@ -630,6 +664,7 @@ async def chat_completions(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     else:
+        _t_log0 = time.time()
         answer = await asyncio.get_event_loop().run_in_executor(
             None,
             functools.partial(
@@ -638,8 +673,10 @@ async def chat_completions(
                 _temperature, _top_p, _ce_thresh, _llm_model,
                 request.skip_router, request.search_query,
                 request.memory_text, request.summary_text,
+                no_retrieval=request.no_retrieval,
             ),
         )
+        log_query(user_input, rag_mode, request.model, answer, time.time() - _t_log0)
         full_text = _format_answer(answer)
         return ChatCompletionResponse(
             id=cid,
@@ -649,6 +686,8 @@ async def chat_completions(
                 finish_reason="stop",
             )],
             usage=OAIUsage(completion_tokens=len(full_text.split())),
+            legal_citations=_citations_payload(answer.citations) or None,
+            confidence=answer.confidence.model_dump() if answer.confidence else None,
         )
 
 
@@ -668,6 +707,7 @@ def _run_pipeline(
     search_query: Optional[str] = None,
     memory_text: str = "",
     summary_text: str = "",
+    no_retrieval: bool = False,
 ) -> Answer:
     """Wrapper mỏng quanh LegalPipeline.run (logic chung ở src/pipeline.py)."""
     return _agent["pipeline"].run(
@@ -676,6 +716,7 @@ def _run_pipeline(
         temperature=temperature, top_p=top_p,
         ce_threshold=ce_threshold, llm_model=llm_model,
         skip_router=skip_router, search_query=search_query,
+        no_retrieval=no_retrieval,
         memory_text=memory_text, summary_text=summary_text,
     )
 
@@ -715,18 +756,53 @@ def _clean_snippet(text: str, max_len: Optional[int] = None) -> str:
     return text
 
 
+def _citation_label(cit) -> str:
+    """Tên hiển thị của văn bản: title > tên file/URL đã làm sạch."""
+    title = (getattr(cit, "title", None) or "").strip()
+    if title and not title.isdigit():
+        return title[:90]
+    return cit.source.replace(".txt", "").replace(".pdf", "").split("/")[-1].split("\\")[-1]
+
+
+def _citations_payload(citations: list) -> list[dict]:
+    """Citations dạng structured cho UI — TOÀN VĂN đoạn trích, giữ xuống dòng.
+
+    Đi kèm SSE chunk (field `legal_citations`, client OpenAI khác bỏ qua) và
+    response non-stream. UI render popup badge [n] từ đây thay vì parse block
+    text đã ép phẳng (mất định dạng).
+    """
+    out = []
+    for i, cit in enumerate(citations, 1):
+        out.append({
+            "ref": getattr(cit, "ref", None) or i,
+            "label": _citation_label(cit),
+            "article": cit.article,
+            "clause": cit.clause,
+            "point": cit.point,
+            "source": cit.source,
+            "text": (cit.snippet or "").strip(),
+        })
+    return out
+
+
 def _format_citations(citations: list) -> str:
-    """Render block '📚 Nguồn pháp lý' từ citations. Rỗng nếu không có citation."""
+    """Render block '📚 Nguồn pháp lý' từ citations. Rỗng nếu không có citation.
+
+    Số [n] lấy từ cit.ref (số LLM dùng trong thân bài) — KHÔNG đánh số lại từ 1,
+    nếu không thân bài ghi [5] mà block chỉ có [1] làm UI tra nguồn thất bại.
+    Snippet cắt ngắn cho gọn — toàn văn đã có trong `legal_citations` (popup UI).
+    """
     if not citations:
         return ""
     lines = ["📚 Nguồn pháp lý:"]
     for i, cit in enumerate(citations, 1):
+        n = getattr(cit, "ref", None) or i
         tag_parts = [p for p in [cit.article, cit.clause] if p]
         tag = " · ".join(tag_parts) if tag_parts else ""
-        src = cit.source.replace(".txt", "").replace(".pdf", "").split("/")[-1].split("\\")[-1]
-        snippet = _clean_snippet(cit.snippet, max_len=None)
-        label = f"{src}{' — ' + tag if tag else ''}"
-        lines.append(f"[{i}] — {label}: {snippet}")
+        full = _clean_snippet(cit.snippet)
+        snippet = full[:240] + ("…" if len(full) > 240 else "")
+        label = f"{_citation_label(cit)}{' — ' + tag if tag else ''}"
+        lines.append(f"[{n}] — {label}: {snippet}")
     return "\n\n".join(lines)
 
 
@@ -753,6 +829,7 @@ async def _stream_pipeline(
     llm_model: Optional[str] = None,
     skip_router: bool = False,
     search_query: Optional[str] = None,
+    no_retrieval: bool = False,
     memory_text: str = "",
     summary_text: str = "",
 ) -> AsyncIterator[str]:
@@ -781,6 +858,24 @@ async def _stream_pipeline(
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         })
 
+    def _citations_chunk(citations: list) -> str:
+        """Chunk mang citations structured (toàn văn) — client khác bỏ qua."""
+        return _sse({
+            "id": cid, "object": "chat.completion.chunk", "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            "legal_citations": _citations_payload(citations),
+        })
+
+    def _confidence_chunk(confidence) -> str:
+        """Chunk mang nhãn độ tin cậy (P2.3) — client OpenAI chuẩn bỏ qua."""
+        return _sse({
+            "id": cid, "object": "chat.completion.chunk", "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            "confidence": confidence.model_dump(),
+        })
+
     created = int(time.time())
     _t_request_start = time.time()
     print(f"\n[REQUEST] '{user_input[:60]}{'...' if len(user_input)>60 else ''}'")
@@ -804,6 +899,7 @@ async def _stream_pipeline(
                 pipeline.prepare, user_input, history, rag_mode,
                 top_k, web_search_enabled, ce_threshold,
                 skip_router=skip_router, search_query=search_query,
+                no_retrieval=no_retrieval,
                 memory_text=memory_text, summary_text=summary_text,
             ),
         )
@@ -816,8 +912,13 @@ async def _stream_pipeline(
     # Flow đã có câu trả lời hoàn chỉnh (answer_direct / tool / no-context)
     if prep.final_answer is not None:
         yield _content(_format_answer(prep.final_answer))
+        if prep.final_answer.citations:
+            yield _citations_chunk(prep.final_answer.citations)
+        if prep.final_answer.confidence:
+            yield _confidence_chunk(prep.final_answer.confidence)
         yield _finish()
         yield "data: [DONE]\n\n"
+        log_query(user_input, rag_mode, model_name, prep.final_answer, time.time() - _t_request_start)
         print(f"  [TIMER] ═══ E2E  : {time.time()-_t_request_start:.2f}s  (không cần generate)\n")
         return
 
@@ -869,6 +970,12 @@ async def _stream_pipeline(
                 tail += "\n\n" + cit_block
             if tail:
                 yield _content(tail)
+            # Citations structured (toàn văn điều luật) cho popup UI
+            if guarded.citations:
+                yield _citations_chunk(guarded.citations)
+            if guarded.confidence:
+                yield _confidence_chunk(guarded.confidence)
+            log_query(user_input, rag_mode, model_name, guarded, time.time() - _t_request_start)
             break
 
     yield _finish()

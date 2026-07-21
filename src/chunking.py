@@ -302,21 +302,42 @@ def chunk_by_legal_structure(
             # Head của Điều (trước Khoản 1) đã chứa 'Điều X. ...' → header gọn
             head_parts = (doc_label,) if clause_label is None else (doc_label, art_title)
 
-            for point_label, point_text in _iter_points(clause_text):
+            # Câu dẫn khoản = phần trước điểm a) (thường chứa MỨC PHẠT:
+            # "7. Phạt tiền từ 4-6 triệu đối với một trong các hành vi sau").
+            # Gắn vào từng điểm con để chunk TỰ CHỨA đủ hành vi + chế tài —
+            # trước đây điểm chỉ có 'c) không chấp hành đèn tín hiệu' thiếu mức
+            # phạt, thua nghị định cũ viết gộp 1 câu (đo 2026-07-08).
+            points = list(_iter_points(clause_text))
+            has_points = any(pl for pl, _ in points)
+            clause_lead = (
+                next((pt for pl, pt in points if pl is None), "").strip()
+                if has_points else ""
+            )
+
+            for point_label, point_text in points:
+                # Khoản CÓ điểm: bỏ chunk câu-dẫn đứng riêng (điểm=None) — câu
+                # dẫn giờ nằm trong mỗi điểm con nên chunk rời chỉ là mảnh
+                # thiếu hành vi (mild distractor cho mọi câu hỏi 'phạt bao nhiêu').
+                if has_points and point_label is None:
+                    continue
                 point_str = f"Điểm {point_label}" if point_label else None
                 # Chunk Điểm cần đủ ngữ cảnh: VB + Điều + Khoản
                 parts = head_parts + ((clause_str,) if point_label else ())
 
-                if len(point_text) <= chunk_size:
+                body = point_text
+                if point_label and clause_lead and clause_lead not in point_text:
+                    body = f"{clause_lead}\n{point_text}"
+
+                if len(body) <= chunk_size:
                     add(
-                        _with_header(point_text, *parts),
+                        _with_header(body, *parts),
                         article=article_str,
                         clause=clause_str,
                         point=point_str,
                         parent_id=parent_id,
                     )
                 else:
-                    for sub in splitter.split_text(point_text):
+                    for sub in splitter.split_text(body):
                         add(
                             _with_header(sub, *parts),
                             article=article_str,

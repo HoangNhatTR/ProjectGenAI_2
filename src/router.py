@@ -106,6 +106,12 @@ Câu hỏi mới của người dùng: {question}
 ─── Quy tắc ───
 1. Nếu action = "retrieve" hoặc "use_tool":
    - search_query = câu hỏi viết lại HOÀN CHỈNH, ĐỘC LẬP
+   - Nếu intent = "followup": search_query BẮT BUỘC gộp ngữ cảnh lịch sử — giữ
+     CHỦ ĐỀ đang bàn, chỉ thay phần user vừa đổi. KHÔNG được dùng nguyên văn câu mới.
+     VD: đang bàn "vượt đèn đỏ xe máy phạt bao nhiêu", user hỏi "thế nếu ô tô vượt thì sao?"
+         → search_query = "ô tô vượt đèn đỏ bị phạt bao nhiêu tiền"
+     VD: user nói "tôi vượt ở nút giao thông" (đang bàn vượt đèn đỏ xe máy)
+         → search_query = "xe máy vượt đèn đỏ tại nút giao thông đường bộ mức phạt"
    - Nếu intent = "compare":
        tool_name = "compare_regulations"
        tool_query = "<đối tượng A>|<đối tượng B>"
@@ -157,6 +163,26 @@ CHỈ trả về JSON đúng schema, KHÔNG kèm giải thích:
   "tool_query":      chuỗi hoặc null,
   "direct_response": chuỗi hoặc null
 }}"""
+
+
+# Prompt chuyên dụng viết lại câu follow-up → query độc lập (1 LLM call gọn).
+_FOLLOWUP_REWRITE_PROMPT = """Cho lịch sử hội thoại pháp luật và câu hỏi tiếp theo (phụ thuộc ngữ cảnh, thường thiếu chủ thể), hãy VIẾT LẠI thành MỘT câu hỏi ĐỘC LẬP, đầy đủ để tra cứu văn bản pháp luật Việt Nam.
+
+Quy tắc:
+- Giữ nguyên CHỦ ĐỀ đang bàn ở lịch sử, chỉ thay phần người dùng vừa đổi.
+- Câu độc lập phải tự đủ nghĩa: KHÔNG dùng "thế", "vậy", "còn", "đó", "này", "kia".
+- Dùng thuật ngữ pháp lý nếu biết (vd "xe máy" → "xe mô tô, xe gắn máy").
+- CHỈ trả về đúng 1 câu hỏi, KHÔNG giải thích, KHÔNG đánh số, KHÔNG ngoặc kép.
+
+Ví dụ: lịch sử bàn "xe máy vượt đèn đỏ phạt bao nhiêu", câu tiếp "thế đối với ô tô thì sao?"
+→ ô tô vượt đèn đỏ bị phạt bao nhiêu tiền
+
+Lịch sử:
+{history}
+
+Câu hỏi tiếp theo: {question}
+
+Câu hỏi độc lập:"""
 
 
 VALID_ACTIONS = {"retrieve", "use_tool", "answer_direct"}
@@ -260,9 +286,14 @@ class SmartRouter:
         # ngay, bỏ qua LLM (nhanh + nhất quán + tiết kiệm quota). Các intent cần
         # rewrite/format (followup/compare/draft/chitchat...) vẫn để LLM lo.
         has_doc = history_has_document(history)
+        # History "thật" = có lượt hội thoại trước (bỏ system msg đính kèm file)
+        has_hist = bool(history) and any(
+            m.get("role") in ("user", "assistant") for m in (history or [])
+        )
         if self.classifier is not None:
             clf = self.classifier.classify(
                 question, has_document=has_doc, web_search_enabled=web_search_enabled,
+                has_history=has_hist,
             )
             if clf.confident and not clf.needs_llm_query:
                 logger.info(
@@ -270,6 +301,21 @@ class SmartRouter:
                     f"action={clf.action} conf={clf.confidence:.2f} → bỏ qua LLM"
                 )
                 return self._decision_from_classifier(clf, question)
+            # Follow-up (anaphora "thế đối với ô tô thì sao?") → dùng 1 lượt LLM
+            # CHUYÊN DỤNG chỉ để VIẾT LẠI câu hỏi độc lập kèm ngữ cảnh, rồi
+            # retrieve. KHÔNG dùng router prompt tổng quát vì nó hay đổi sang
+            # compare/tool (Bug 2026-07-09: "thế đối với ô tô" → compare → rác;
+            # hoặc rơi về câu thô mất ngữ cảnh → NĐ 161-HĐBT 1987 nhập khẩu ô tô).
+            if clf.confident and clf.intent == "followup":
+                self._connect()
+                rewritten = self._rewrite_followup(question, history)
+                logger.info(
+                    f"Router follow-up rewrite: '{question[:40]}' → '{rewritten[:60]}'"
+                )
+                return RouterDecision(
+                    action="retrieve", intent="followup",
+                    search_query=rewritten, raw="followup_rewrite",
+                )
 
         self._connect()
 
@@ -430,6 +476,39 @@ class SmartRouter:
             direct_response=direct_response.strip(),
             raw=raw,
         )
+
+    # ── Follow-up rewrite ────────────────────────────────────────────────────
+
+    def _rewrite_followup(self, question: str, history: Optional[list[dict]]) -> str:
+        """1 LLM call chuyên dụng: viết lại câu follow-up thành query độc lập.
+
+        Trả câu gốc nếu LLM lỗi (ít nhất không đổi sang tool). Prompt tập trung
+        → không bị lạc sang compare/calculate như router prompt tổng quát.
+        """
+        if history:
+            recent = history[-(self.max_history_turns * 2):]
+            hist_str = "\n".join(
+                f"{'Người dùng' if m.get('role') == 'user' else 'Trợ lý'}: "
+                f"{(m.get('content') or '')[:400]}"
+                for m in recent
+            ) or "(trống)"
+        else:
+            hist_str = "(trống)"
+        prompt = _FOLLOWUP_REWRITE_PROMPT.format(history=hist_str, question=question)
+        try:
+            resp = self._client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.0, "num_ctx": 2048},
+            )
+            out = (resp["message"]["content"] or "").strip()
+            for line in out.splitlines():
+                line = line.strip().strip('"').strip("- ").strip()
+                if len(line) >= 6:
+                    return line
+        except Exception as exc:
+            logger.warning(f"Follow-up rewrite lỗi ({exc}) → dùng câu gốc")
+        return question
 
     # ── Fallback ───────────────────────────────────────────────────────────────
 

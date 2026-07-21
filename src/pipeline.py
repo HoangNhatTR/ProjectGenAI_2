@@ -20,9 +20,11 @@ from loguru import logger
 
 from . import config
 from .cache import RetrievalCache
+from .confidence import compute_confidence
 from .generator import Generator
 from .guardrails import apply_guardrails
 from .reranker import cap_per_doc, rerank as _rerank
+from .retriever import _rule_expand
 from .schemas import Answer
 from .state import ConversationState
 
@@ -232,22 +234,45 @@ class LegalPipeline:
         # khiến CE chỉ đảo thứ tự chunk có sẵn, không cứu được chunk đúng hạng 8.
         pool = max(top_k * config.RERANK_POOL_MULT, config.RERANK_POOL_MIN)
 
+        # Parent expansion để SAU rerank: CrossEncoder chấm child chunk ngắn
+        # (~600 ký tự) thay vì full Điều đã expand (hàng nghìn ký tự) — CE trên
+        # CPU scale theo độ dài input, đây là khâu tốn 1.5-5s/câu trước đây.
+        # CE thấy đúng đoạn text đã match cũng cho tín hiệu relevance sạch hơn.
         _t0 = time.time()
         contexts = self.retriever.retrieve(
             search_query, top_k=pool, use_kg=use_kg, allowed_sources=allowed_sources,
-            use_hyde=config.USE_HYDE, use_parent_expansion=True,
+            use_hyde=config.USE_HYDE, use_parent_expansion=False,
             use_multi_query=config.USE_MULTI_QUERY,
         )
         logger.info(f"Retrieve {time.time()-_t0:.2f}s — {len(contexts)} chunks (pool={pool})")
 
         if contexts:
-            # Per-doc cap: VB đồ sộ không được lấp kín pool bằng số đông chunk
-            contexts = cap_per_doc(contexts)
             _use_ce = contexts[0].score < ce_threshold
+            _t0 = time.time()
+            # Rerank theo câu đã RULE-EXPAND (thuật ngữ luật) nếu có: câu thô
+            # "vượt đèn đỏ" khiến reranker chấm Đ7 Khoản 1 ≈ Khoản 7 (đều thấp
+            # ~0.22, K1 thắng sát nút) vì header Điều dài giống nhau + từ dân dã
+            # ≠ từ luật; câu expand "không chấp hành hiệu lệnh đèn tín hiệu" cho
+            # K7=1.00 (đo 2026-07-09). Retrieval đã dùng expand, rerank cũng nên.
+            rerank_query = _rule_expand(search_query) or search_query
             contexts = _rerank(
-                search_query, contexts, top_k=top_k, use_cross_encoder=_use_ce,
+                rerank_query, contexts, top_k=None, use_cross_encoder=_use_ce,
             )
-            logger.info(f"Rerank CE={'on' if _use_ce else 'skip'} ({len(contexts)} chunks)")
+            # Per-doc cap SAU rerank (trước đây TRƯỚC): chunk đúng khoản thường
+            # chỉ xuất hiện ở 1 query variant (rule expansion) nên điểm RRF thô
+            # thấp → cap-trước cắt mất nó trước khi rerank kịp chấm cao (bug
+            # 2026-07-09: "xe máy vượt đèn đỏ" mất Đ7K7 NĐ168, generator lấy
+            # nhầm Đ7K1/Đ8). Cap-sau giữ top-N chunk/VB theo điểm RERANK.
+            contexts = cap_per_doc(contexts)
+            # Retriever inject từ ngoài có thể không có expand_parents (test stub)
+            _expand = getattr(self.retriever, "expand_parents", None)
+            if _expand is not None:
+                contexts = _expand(contexts)
+            contexts = contexts[:top_k]
+            logger.info(
+                f"Rerank CE={'on' if _use_ce else 'skip'} {time.time()-_t0:.2f}s "
+                f"({len(contexts)} chunks)"
+            )
 
             # Ngưỡng "không đủ căn cứ" — chỉ khi CE chạy (score đã chuẩn hóa
             # sigmoid). MIN_EVIDENCE_SCORE=0 (mặc định) = tắt, chờ calibrate.
@@ -278,6 +303,7 @@ class LegalPipeline:
         use_planner: bool = True,
         skip_router: bool = False,
         search_query: Optional[str] = None,
+        no_retrieval: bool = False,
         memory_text: str = "",
         summary_text: str = "",
     ) -> PipelinePrep:
@@ -291,6 +317,14 @@ class LegalPipeline:
         search_query (chỉ dùng với skip_router): truy vấn RETRIEVE riêng —
         caller máy biết chính xác cần tìm gì (vd "khung hình phạt điểm c khoản 1
         Điều 250"), còn prompt generate có thể dài đầy hướng dẫn.
+
+        no_retrieval (chỉ dùng với skip_router): caller máy biết chắc tác vụ
+        KHÔNG cần tra kho luật (vd trích ngày/lập luận từ chính tài liệu đưa
+        vào prompt) — bỏ hẳn bước retrieve+rerank trên 5 triệu chunk thay vì
+        chỉ rút gọn search_query. Trước đây thiếu search_query khiến pipeline
+        dùng NGUYÊN prompt dài (có thể hàng chục nghìn ký tự) làm câu truy vấn
+        retrieve → tốn nhiều giây vô ích mỗi tài liệu (vd dossier_timeline,
+        dossier_arguments) mà câu trả lời không hề dùng tới kết quả đó.
 
         memory_text/summary_text: long-term memory (facts về user) + rolling
         summary — CLIENT tự lưu và gửi kèm (server stateless). Trước đây 2 lớp
@@ -313,6 +347,13 @@ class LegalPipeline:
 
         # ── Đường tắt cho machine call: RAG trực tiếp, tất định ─────────────
         if skip_router:
+            if no_retrieval:
+                logger.info("skip_router=True, no_retrieval=True → bỏ qua retrieve, generate thẳng")
+                return PipelinePrep(
+                    contexts=[],
+                    state_context=conv_state.to_context_string(),
+                    llm_history=llm_history,
+                )
             _sq = (search_query or "").strip() or user_input
             logger.info(f"skip_router=True → Flow C trực tiếp (search='{_sq[:60]}')")
             contexts = self._retrieve_rerank(
@@ -524,11 +565,20 @@ class LegalPipeline:
         """Áp guardrails cho answer đã generate (chính sách chung mọi flow)."""
         # Tool flow: kết quả tool là căn cứ → không cảnh báo "thiếu căn cứ",
         # và không kiểm chứng trích dẫn vs contexts (căn cứ nằm trong tool result)
-        return apply_guardrails(
+        guarded = apply_guardrails(
             answer, prep.contexts,
             warn_no_evidence=not prep.tool_results,
             verify_cited=not prep.tool_results,
         )
+        # Nhãn độ tin cậy (P2.3) — chỉ áp cho flow RAG thật (không phải tool
+        # flow, căn cứ ở đó không đến từ contexts nên 4 tín hiệu vô nghĩa).
+        # Tính trên answer.answer GỐC (trước khi apply_guardrails nối thêm
+        # disclaimer/warning) — text đó không chứa "Điều N" nên không đổi kết
+        # quả verify_citations, nhưng tính trên bản gốc cho rõ ràng.
+        if not prep.tool_results:
+            confidence = compute_confidence(answer.answer, answer.citations, prep.contexts)
+            guarded = guarded.model_copy(update={"confidence": confidence})
+        return guarded
 
     def run(
         self,
@@ -544,6 +594,7 @@ class LegalPipeline:
         use_planner: bool = True,
         skip_router: bool = False,
         search_query: Optional[str] = None,
+        no_retrieval: bool = False,
         memory_text: str = "",
         summary_text: str = "",
     ) -> Answer:
@@ -553,6 +604,7 @@ class LegalPipeline:
         prep = self.prepare(
             user_input, history, rag_mode, top_k, web_search_enabled, ce_threshold,
             use_planner=use_planner, skip_router=skip_router, search_query=search_query,
+            no_retrieval=no_retrieval,
             memory_text=memory_text, summary_text=summary_text,
         )
         if prep.final_answer is not None:

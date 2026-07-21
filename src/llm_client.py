@@ -302,6 +302,13 @@ class Router9Client:
             else:
                 raise
 
+        # Một số model free (vd oc/nemotron-3-ultra-free) thỉnh thoảng trả
+        # choices=None dù HTTP 200 — flaky ngẫu nhiên (~1/3 request), không phải
+        # lỗi code hay hết quota. Raise message chứa keyword transient để
+        # _call_with_retry backoff+retry thay vì fail điều luôn.
+        if not response.choices:
+            raise RuntimeError(f"Empty response (no choices) from model={model} — timeout/transient")
+
         text = response.choices[0].message.content or ""
         return {"message": {"content": text}}
 

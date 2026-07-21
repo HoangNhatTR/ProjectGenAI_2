@@ -76,3 +76,34 @@ def test_chunk_text_da_dung_cau_truc_van_hoat_dong():
                   "Điều 2. Đối tượng áp dụng\nÁp dụng với mọi tổ chức ...")
     chunks = chunk_document(_doc(structured), parent_store=None)
     assert {"Điều 1", "Điều 2"}.issubset(_articles(chunks))
+
+
+# ── Điểm chunk gắn câu dẫn khoản (self-contained, 2026-07-08) ────────────────
+
+def test_diem_chunk_gan_cau_dan_khoan():
+    """Mỗi điểm con phải chứa MỨC PHẠT (câu dẫn khoản) + hành vi của điểm đó,
+    và KHÔNG còn chunk câu-dẫn đứng riêng lẻ."""
+    from src.chunking import chunk_document
+    from src.schemas import DocumentMetadata, RawDocument
+
+    text = (
+        "Điều 7. Xử phạt người điều khiển xe mô tô, xe gắn máy\n"
+        "7. Phạt tiền từ 4.000.000 đồng đến 6.000.000 đồng đối với người điều "
+        "khiển xe thực hiện một trong các hành vi vi phạm sau đây:\n"
+        "a) Điều khiển xe lạng lách, đánh võng trên đường bộ;\n"
+        "c) Không chấp hành hiệu lệnh của đèn tín hiệu giao thông;\n"
+    ) + ("x" * 6000)  # ép Điều dài → đi nhánh Khoản → Điểm
+    doc = RawDocument(text=text, metadata=DocumentMetadata(
+        source="https://vbpl.vn/test-168", doc_number="168/2024/NĐ-CP",
+        title="Nghị định 168/2024/NĐ-CP"))
+
+    chunks = chunk_document(doc)
+    diem_c = [c for c in chunks if c.point == "Điểm c"]
+    assert diem_c, "phải có chunk Điểm c"
+    txt_c = diem_c[0].text
+    assert "đèn tín hiệu" in txt_c            # hành vi của điểm c
+    assert "4.000.000" in txt_c               # mức phạt từ câu dẫn khoản
+
+    # Không còn chunk câu-dẫn đứng riêng (point=None nhưng cùng khoản có điểm)
+    lead_only = [c for c in chunks if c.clause == "Khoản 7" and c.point is None]
+    assert not lead_only, "câu dẫn khoản phải gộp vào điểm, không đứng riêng"

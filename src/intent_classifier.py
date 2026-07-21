@@ -103,6 +103,25 @@ _FIRST_PERSON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Follow-up (anaphora) — câu phụ thuộc ngữ cảnh hội thoại trước ─────────────
+# "thế nếu ô tô vượt thì sao?" / "còn xe tải?" / "trường hợp đó..." KHÔNG tự
+# đứng được một mình: đem retrieve nguyên văn sẽ ra sai chủ đề (đã quan sát:
+# "ô tô vượt" → chunks VƯỢT XE thay vì VƯỢT ĐÈN ĐỎ theo ngữ cảnh). Khi có
+# history mà câu khớp anaphora (hoặc quá ngắn để tự chứa đủ ngữ cảnh) → intent
+# "followup" (needs_llm_query) để LLM router viết lại query kèm ngữ cảnh —
+# giống bước "condense question" của conversational RAG chuẩn.
+_FOLLOWUP_RE = re.compile(
+    r"^\s*(thế|vậy|còn|thì|nếu\s+vậy)\b"
+    r"|\b(thì\s+sao|thì\s+(như\s+)?thế\s+nào|có\s+sao\s+không|có\s+khác\s+(gì|không))\s*\??\s*$"
+    r"|\b(cái|điều|khoản|mức|lỗi|hành\s+vi|trường\s+hợp|tình\s+huống|vụ|xe|người|luật|nghị\s+định)\s+(đó|ấy|kia|vừa\s+rồi|nói\s+trên)\b"
+    r"|\b(như\s+(trên|vậy|thế|đã\s+nói)|ở\s+trên|vừa\s+(nói|nhắc|hỏi|đề\s+cập))\b"
+    r"|\bcòn\s+(nếu|với|đối\s+với)\b",
+    re.IGNORECASE,
+)
+# Câu ngắn hơn ngưỡng này (khi ĐÃ có history) coi là phụ thuộc ngữ cảnh —
+# "tôi vượt ở nút giao thông" (26 ký tự) không mang đủ chủ đề để retrieve.
+FOLLOWUP_SHORT_LEN = int(os.getenv("INTENT_FOLLOWUP_SHORT_LEN", "40"))
+
 # Prototype câu hỏi pháp lý "cần tra cứu" — centroid cho embedding gate.
 _RETRIEVE_PROTOTYPES = [
     "mức phạt vượt đèn đỏ đối với xe máy là bao nhiêu",
@@ -204,8 +223,13 @@ class IntentClassifier:
         question: str,
         has_document: bool = False,
         web_search_enabled: bool = True,
+        has_history: bool = False,
     ) -> ClassifierResult:
-        """Phân loại 1 câu hỏi. Rule trước (precision cao), embedding sau (gate)."""
+        """Phân loại 1 câu hỏi. Rule trước (precision cao), embedding sau (gate).
+
+        has_history=True (hội thoại đã có lượt trước) bật tầng followup: câu
+        anaphora/quá ngắn → intent followup để LLM rewrite query kèm ngữ cảnh.
+        """
         q = (question or "").strip()
         if not q:
             return _result("clarify", RULE_CONFIDENCE, "rule")
@@ -237,6 +261,14 @@ class IntentClassifier:
 
         if _KG_RE.search(q):
             return _result("kg_query", RULE_CONFIDENCE, "rule")
+
+        # ── Follow-up gate: câu phụ thuộc ngữ cảnh hội thoại trước ────────────
+        # CHẠY TRƯỚC embedding gate — embed gate chỉ đo "giống câu pháp lý"
+        # chứ không biết câu có tự đứng được không ("thế nếu ô tô vượt thì sao?"
+        # cosine vẫn cao → từng bị retrieve nguyên văn ra sai chủ đề).
+        # needs_llm_query=True → router fallback LLM rewrite query kèm history.
+        if has_history and (_FOLLOWUP_RE.search(q) or len(q) <= FOLLOWUP_SHORT_LEN):
+            return _result("followup", RULE_CONFIDENCE, "rule")
 
         # ── Embedding gate: có phải câu hỏi pháp lý cần tra cứu? ───────────────
         cos = self._max_retrieve_cos(q)

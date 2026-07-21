@@ -1,0 +1,57 @@
+{
+  "_huong_dan_vi": [
+    "Khuôn mẫu gold cho scripts/eval_confidence.py (calibration P2.3 — xem",
+    "docs/tro-ly-luat-su/lo-trinh-cong-viec.md). Mỗi câu trong 'questions':",
+    "  id                : mã ngắn, chỉ để hiển thị report.",
+    "  question          : câu hỏi gửi thẳng tới /v1/chat/completions.",
+    "  expected_correct  : true/false — luật sư ĐỌC câu trả lời hệ thống trả về",
+    "                       (chạy thử qua UI hoặc script) rồi tự đánh giá đúng",
+    "                       hay sai về mặt pháp lý. KHÔNG suy đoán, phải đọc",
+    "                       thật.",
+    "  graded_by         : BẮT BUỘC — tên/username luật sư đã chấm. Để trống =",
+    "                       script BỎ QUA câu này (không tính điểm) — tránh",
+    "                       nhầm placeholder chưa ai xác nhận thành gold thật.",
+    "Chạy: cd ProjectGenAI_2 && python -m scripts.eval_confidence",
+    "Tiêu chí nghiệm thu roadmap: nhóm nhãn 'Cao' phải đúng >=90%; nhóm 'Thấp'",
+    "phải đúng THẤP HƠN nhóm 'Cao' rõ rệt (nếu ngang nhau thì nhãn vô dụng).",
+    "Cần ít nhất ~30 câu trải đều nhiều chủ đề (giao thông, hình sự, dân sự,",
+    "hành chính, câu hỏi mơ hồ/ngoài phạm vi) để calibration có ý nghĩa — 5 câu",
+    "mẫu dưới đây chỉ để chạy thử script (CHƯA đủ số lượng, CHƯA có graded_by)."
+  ],
+  "questions": [
+    {
+      "id": "q01",
+      "question": "Vượt đèn đỏ với xe máy bị phạt bao nhiêu tiền?",
+      "expected_correct": null,
+      "graded_by": "",
+      "system_answer_preview": "Chào bạn, với tư cách là Trợ lý tư vấn pháp luật, tôi xin giải đáp thắc mắc của bạn về mức xử phạt đối với hành vi vượt đèn đỏ (không chấp hành hiệu lệnh của đèn tín hiệu giao thông) khi điều khiển xe máy như sau:\n\nTheo quy định tại **Điểm c Khoản 7 Điều 7 Nghị định 168/2024/NĐ-CP [2]**, người điều khiển xe mô tô, xe gắn máy (bao gồm cả xe máy điện) có hành vi không chấp hành hiệu lệnh của đèn tín hiệu giao thông sẽ bị phạt tiền từ **4.000.000 đồng đến 6.000.000 đồng**.\n\n**Lưu ý quan trọng:**\n*   **Quy định mới:** Nghị định 168/2024/NĐ-CP là văn bản mới nhất thay thế các quy định cũ (như Nghị định 100/2019/NĐ-CP [4] hay các văn bản hợp nhất trước đó [5]). Mức phạt hiện nay đã tăng lên đáng kể so với trước đây, vì vậy bạn cần đặc biệt lưu ý khi tham gia giao thông.\n*   **Hình thức xử phạt b",
+      "system_confidence_label": "Thấp"
+    },
+    {
+      "id": "q02",
+      "question": "Trộm cắp tài sản dưới 2 triệu đồng có bị truy tố hình sự không?",
+      "expected_correct": null,
+      "graded_by": "",
+      "system_answer_preview": "Chào bạn, với tư cách là Trợ lý tư vấn pháp luật, tôi xin giải đáp thắc mắc của bạn về việc truy cứu trách nhiệm hình sự đối với hành vi trộm cắp tài sản dưới 2 triệu đồng như sau:\n\nTheo quy định tại **Khoản 1 Điều 173 Bộ luật Hình sự (Văn bản hợp nhất 11/VBHN-VPQH năm 2025)** [1], hành vi trộm cắp tài sản dưới 2.000.000 đồng **VẪN CÓ THỂ** bị truy cứu trách nhiệm hình sự nếu thuộc một trong các trường hợp sau đây:\n\n1. Đã bị xử phạt vi phạm hành chính về hành vi chiếm đoạt tài sản mà còn vi phạm.\n2. Đã bị kết án về tội chiếm đoạt tài sản, chưa được xóa án tích mà còn vi phạm.\n3. Gây ảnh hưởng xấu đến an ninh, trật tự, an toàn xã hội.\n4. Tài sản là phương tiện kiếm sống chính của người bị hại và gia đình họ.\n5. Tài sản là kỷ vật, di vật, đồ thờ cúng có giá trị đặc biệt về mặt tinh thần đối ",
+      "system_confidence_label": "Cao"
+    },
+    {
+      "id": "q03",
+      "question": "Thời hạn kháng cáo bản án dân sự sơ thẩm là bao nhiêu ngày?",
+      "expected_correct": null,
+      "graded_by": ""
+    },
+    {
+      "id": "q04",
+      "question": "Con mèo của tôi thích ăn gì nhất vào mùa hè?",
+      "expected_correct": null,
+      "graded_by": ""
+    },
+    {
+      "id": "q05",
+      "question": "Quy định về việc nuôi ong mật trong khu dân cư có gây tiếng ồn không theo pháp luật Việt Nam?",
+      "expected_correct": null,
+      "graded_by": ""
+    }
+  ]
+}

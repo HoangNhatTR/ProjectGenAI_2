@@ -24,6 +24,30 @@ def _extract_cited_indices(answer_text: str, max_n: int) -> list[int]:
     nums = set(int(m) for m in re.findall(r'\[(\d+)\]', answer_text))
     return sorted(i - 1 for i in nums if 1 <= i <= max_n)
 
+
+def _build_citations(answer_text: str, contexts: list[RetrievedChunk]) -> list[Citation]:
+    """Dựng citations từ các chunk LLM thực sự trích bằng [n].
+
+    ref giữ ĐÚNG số [n] trong thân bài (1-based theo thứ tự contexts) để block
+    nguồn in cùng số — LLM trích [3], [5] thì block phải là [3], [5], không phải
+    [1], [2]. Không tìm thấy số nào → fallback toàn bộ contexts (ref = 1..k).
+    """
+    cited_indices = _extract_cited_indices(answer_text, len(contexts))
+    if not cited_indices:
+        cited_indices = list(range(len(contexts)))
+    return [
+        Citation(
+            ref=i + 1,
+            source=contexts[i].chunk.metadata.source,
+            title=contexts[i].chunk.metadata.title,
+            article=contexts[i].chunk.article,
+            clause=contexts[i].chunk.clause,
+            point=contexts[i].chunk.point,
+            snippet=contexts[i].chunk.text,
+        )
+        for i in cited_indices
+    ]
+
 if TYPE_CHECKING:
     from .tools import ToolResult
 
@@ -258,20 +282,9 @@ class Generator:
         )
         answer_text = response["message"]["content"].strip()
 
-        # Citations: chỉ giữ chunks được LLM thực sự trích dẫn bằng [n].
-        # Nếu không tìm thấy số nào, fallback về tất cả contexts (an toàn).
-        cited_indices = _extract_cited_indices(answer_text, len(contexts))
-        cited_contexts = [contexts[i] for i in cited_indices] if cited_indices else contexts
-        citations = [
-            Citation(
-                source=r.chunk.metadata.source,
-                article=r.chunk.article,
-                clause=r.chunk.clause,
-                point=r.chunk.point,
-                snippet=r.chunk.text,
-            )
-            for r in cited_contexts
-        ]
+        # Citations: chỉ giữ chunks được LLM thực sự trích dẫn bằng [n],
+        # ref giữ đúng số [n] trong thân bài.
+        citations = _build_citations(answer_text, contexts)
 
         return Answer(question=question, answer=answer_text, citations=citations)
 
@@ -347,19 +360,8 @@ class Generator:
                 yield answer.answer
             return
 
-        # Lọc citations từ answer đã stream xong
-        cited_indices = _extract_cited_indices(full_text, len(contexts))
-        cited_contexts = [contexts[i] for i in cited_indices] if cited_indices else contexts
-        citations = [
-            Citation(
-                source=r.chunk.metadata.source,
-                article=r.chunk.article,
-                clause=r.chunk.clause,
-                point=r.chunk.point,
-                snippet=r.chunk.text,
-            )
-            for r in cited_contexts
-        ]
+        # Lọc citations từ answer đã stream xong (ref giữ đúng số [n] thân bài)
+        citations = _build_citations(full_text, contexts)
         # Trả Answer qua attribute để caller lấy sau khi yield xong
         self._last_stream_answer = Answer(
             question=question, answer=full_text, citations=citations

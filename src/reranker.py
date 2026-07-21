@@ -54,10 +54,147 @@ _CRIMINAL_HINT_RE = re.compile(
     r"phạt tù|đi tù|tù giam|hình sự|mức án|án phạt|khung hình phạt|truy cứu|tội"
 )
 
+# ── Railway-mismatch demote — chunk đường ngang/cầu chung cho query đường bộ ──
+# Failure mode đo được (2026-07-08, inspect 'vượt đèn đỏ'): chunk Điều "quy tắc
+# giao thông tại ĐƯỜNG NGANG, CẦU CHUNG" (giao đường sắt) chứa nguyên văn
+# "vượt... khi đèn đỏ đã bật sáng" → CE chấm cao hơn chunk đèn tín hiệu ĐƯỜNG BỘ
+# của NĐ 168 (phát biểu "không chấp hành hiệu lệnh đèn tín hiệu"). Query không
+# nhắc đường sắt → demote các chunk đường ngang. Query CÓ nhắc → giữ nguyên.
+# Chỉ nhìn HEADER chunk (tiêu đề Điều) — thân chunk đường bộ nhắc "đường sắt"
+# tình cờ không bị oan. Tắt: RAILWAY_MISMATCH_FACTOR=1.0
+RAILWAY_MISMATCH_FACTOR = float(os.getenv("RAILWAY_MISMATCH_FACTOR", "0.8"))
+_RAILWAY_RE = re.compile(r"đường\s+ngang|cầu\s+chung|đường\s+sắt|tàu\s+(hỏa|lửa)", re.IGNORECASE)
+
+
+def _railway_mismatch_factor(query_lower: str, chunk) -> float:
+    """×RAILWAY_MISMATCH_FACTOR nếu chunk thuộc Điều đường ngang/cầu chung
+    mà query không nhắc gì tới đường sắt. Còn lại 1.0."""
+    if RAILWAY_MISMATCH_FACTOR >= 1.0 or _RAILWAY_RE.search(query_lower):
+        return 1.0
+    head = (chunk.text or "")[:160]
+    return RAILWAY_MISMATCH_FACTOR if _RAILWAY_RE.search(head) else 1.0
+
+
+# ── Machinery-mismatch demote — "xe máy chuyên dùng" cho query xe thường ──────
+# "xe máy" (mô tô, xe gắn máy — Điều 7 NĐ168, 4-6tr) khớp lexical với "xe MÁY
+# CHUYÊN DÙNG" (xe công trình/máy kéo — Điều 8 NĐ168, 6-8tr) → reranker lôi Đ8
+# lên gần Đ7, generator trích nhầm mức phạt sai đối tượng (đo 2026-07-09). Query
+# nói xe thường mà KHÔNG nhắc 'chuyên dùng' → demote chunk 'xe máy chuyên dùng'.
+# Query CÓ 'chuyên dùng'/'máy kéo' → giữ nguyên. Tắt: MACHINERY_MISMATCH_FACTOR=1.0
+MACHINERY_MISMATCH_FACTOR = float(os.getenv("MACHINERY_MISMATCH_FACTOR", "0.7"))
+_MACHINERY_RE = re.compile(r"chuyên\s+dùng|máy\s+kéo|máy\s+chuyên\s+dùng", re.IGNORECASE)
+
+
+def _machinery_mismatch_factor(query_lower: str, chunk) -> float:
+    """×MACHINERY_MISMATCH_FACTOR nếu chunk thuộc Điều 'xe máy chuyên dùng'
+    mà query không nhắc 'chuyên dùng'. Còn lại 1.0."""
+    if MACHINERY_MISMATCH_FACTOR >= 1.0 or _MACHINERY_RE.search(query_lower):
+        return 1.0
+    head = (chunk.text or "")[:160]
+    return MACHINERY_MISMATCH_FACTOR if _MACHINERY_RE.search(head) else 1.0
+
+
 # ── Per-doc cap — chống 'số đông chunk' trong pool ứng viên ────────────────────
 # VB đồ sộ (03/VBHN-BGTVT 6.983 chunk) lấp kín pool bằng nhiều chunk trung bình
 # → chunk đúng của VB khác (NĐ 168) không còn slot cho CE thấy. Tắt: PER_DOC_CAP=0
 PER_DOC_CAP = int(os.getenv("PER_DOC_CAP", "3"))
+
+# ── CE input cap — chặn text quá dài đưa vào CrossEncoder ─────────────────────
+# CE trên CPU scale theo độ dài token; chunk đã parent-expand (full Điều, có thể
+# hàng chục nghìn ký tự) làm 1 lần predict tốn nhiều giây. Pipeline giờ rerank
+# child chunk ngắn, cap này là lưới an toàn cho caller khác. Tắt: CE_MAX_CHARS=0
+CE_MAX_CHARS = int(os.getenv("CE_MAX_CHARS", "2000"))
+
+# ── CE tốc độ (đo 2026-07-08: Rerank 9.6-30s/câu = khâu chậm nhất pipeline) ────
+# max_length: bge-reranker-v2-m3 nhận tới 8192 token; KHÔNG cap thì 1 chunk dài
+# (chunk NĐ theo khoản ~2000 ký tự ≈ 1000+ token) kéo CẢ batch pad theo nó →
+# attention phình 4-6×. 512 token là mức chuẩn BGE, đủ phủ child chunk ~600 ký
+# tự + header Điều/Khoản ở đầu. Tắt cap: RERANKER_MAX_LENGTH=0
+RERANKER_MAX_LENGTH = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
+# int8 dynamic quantization (chỉ Linear layers): ~2-3× nhanh hơn trên CPU, chất
+# lượng xê dịch nhẹ — BẬT phải kiểm ranking (inspect ND168 vẫn top). Mặc định tắt.
+RERANKER_INT8 = os.getenv("RERANKER_INT8", "0").lower() in ("1", "true")
+
+# ── Remote rerank API (tùy chọn) — GPU cloud thay CE local ────────────────────
+# Endpoint Cohere-compatible /rerank (SiliconFlow, Jina, Pinecone...): ~1-2s/20
+# cặp thay 7-41s CPU local. Bật bằng RERANK_API_URL + RERANK_API_KEY (.env);
+# lỗi/timeout → tự fallback CE local (demo không chết vì mạng). Score API cùng
+# thang [0,1] như sigmoid CE nên công thức kết hợp rule/temporal giữ nguyên.
+RERANK_API_URL = os.getenv("RERANK_API_URL", "").strip()
+RERANK_API_KEY = os.getenv("RERANK_API_KEY", "").strip()
+RERANK_API_MODEL = os.getenv("RERANK_API_MODEL", "Qwen/Qwen3-Reranker-8B")
+RERANK_API_TIMEOUT = float(os.getenv("RERANK_API_TIMEOUT", "15"))
+# Format API: "cohere" (SiliconFlow/Jina/Pinecone — POST {model,query,documents})
+# hoặc "hf" (HF Inference text-classification — POST {inputs:[{text,text_pair}]},
+# dùng được CHÍNH bge-reranker-v2-m3 → điểm tương đương CE local).
+RERANK_API_KIND = os.getenv("RERANK_API_KIND", "cohere").strip().lower()
+
+
+def remote_rerank_available() -> bool:
+    """True nếu đã cấu hình đủ URL + key cho remote rerank."""
+    return bool(RERANK_API_URL and RERANK_API_KEY)
+
+
+def _remote_rerank_scores(query: str, docs: list[str]) -> Optional[list[float]]:
+    """Gọi rerank API, trả list score THEO THỨ TỰ docs; None nếu lỗi (caller
+    fallback CE local).
+
+    - kind="cohere": POST {model,query,documents} → results[{index,
+      relevance_score}] (có thể đã sort theo score → đặt lại theo index).
+    - kind="hf": POST {inputs:[{text: query, text_pair: doc}]} → mỗi cặp một
+      list [{label, score}] (score đã sigmoid — cùng thang CE local).
+    """
+    import requests
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {RERANK_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        if RERANK_API_KIND == "hf":
+            resp = requests.post(
+                RERANK_API_URL, headers=headers,
+                json={"inputs": [{"text": query, "text_pair": d} for d in docs]},
+                timeout=RERANK_API_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Shape THỰC TẾ (đo 2026-07-08): batch N cặp → [[{label,score}×N]]
+            # (1 list ngoài, list trong có N dict THEO THỨ TỰ cặp). Phòng cả
+            # shape chuẩn pipeline [[{..}] ×N] (mỗi cặp một list riêng).
+            if not isinstance(data, list):
+                raise ValueError(f"HF API trả {type(data)}")
+            if len(data) == 1 and isinstance(data[0], list) and len(data[0]) == len(docs):
+                per_pair = data[0]
+            elif len(data) == len(docs):
+                per_pair = [item[0] if isinstance(item, list) else item for item in data]
+            else:
+                raise ValueError(f"HF API shape lạ: ngoài={len(data)}, cần {len(docs)} cặp")
+            return [float(p["score"]) for p in per_pair]
+
+        # Mặc định: Cohere-compatible /rerank
+        resp = requests.post(
+            RERANK_API_URL, headers=headers,
+            json={
+                "model": RERANK_API_MODEL,
+                "query": query,
+                "documents": docs,
+                "return_documents": False,
+            },
+            timeout=RERANK_API_TIMEOUT,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if len(results) != len(docs):
+            raise ValueError(f"API trả {len(results)}/{len(docs)} kết quả")
+        scores = [0.0] * len(docs)
+        for r in results:
+            scores[int(r["index"])] = float(r["relevance_score"])
+        return scores
+    except Exception as exc:
+        from loguru import logger
+        logger.warning(f"Reranker: remote API lỗi ({exc}) → fallback CE local")
+        return None
 
 _ARTICLE_PATTERNS = [
     r'(?:Điều|điều)\s+\d+',
@@ -100,9 +237,21 @@ def _get_cross_encoder():
     try:
         from sentence_transformers import CrossEncoder
         logger.info(f"Reranker: đang load '{model_name}'...")
-        _cross_encoder = CrossEncoder(model_name)
+        _kwargs = {}
+        if RERANKER_MAX_LENGTH > 0:
+            _kwargs["max_length"] = RERANKER_MAX_LENGTH
+        _cross_encoder = CrossEncoder(model_name, **_kwargs)
+        if RERANKER_INT8:
+            try:
+                import torch
+                _cross_encoder.model = torch.ao.quantization.quantize_dynamic(
+                    _cross_encoder.model, {torch.nn.Linear}, dtype=torch.qint8,
+                )
+                logger.info("Reranker: int8 dynamic quantization BẬT")
+            except Exception as qexc:
+                logger.warning(f"Reranker: quantize int8 thất bại, dùng fp32: {qexc}")
         _ce_available = True
-        logger.info("Reranker: CrossEncoder sẵn sàng.")
+        logger.info(f"Reranker: CrossEncoder sẵn sàng (max_length={RERANKER_MAX_LENGTH or 'model'}).")
         return _cross_encoder
     except Exception as exc:
         logger.warning(
@@ -231,8 +380,11 @@ def rerank(
 ) -> list[RetrievedChunk]:
     """Re-rank danh sách chunk sau retrieval.
 
-    - Cross-encoder available: score = sigmoid(ce_logit) + rule_boost * RULE_ALPHA
-    - Fallback (model không load được): score = rrf_score + rule_boost  (như cũ)
+    Thứ tự ưu tiên scorer (2026-07-08):
+    1. Remote rerank API (RERANK_API_URL — GPU cloud, ~1-2s/20 cặp)
+    2. CrossEncoder local (fallback khi API lỗi/chưa cấu hình)
+    3. Rule-based thuần (lưới cuối): score = rrf_score + rule_boost
+    Điểm neural (1/2) kết hợp: (score + rule_boost×RULE_ALPHA) × temporal × fine × railway
 
     Args:
         query:   câu hỏi gốc (đã rewrite bởi router)
@@ -248,35 +400,53 @@ def rerank(
     query_lower = query.lower()
     query_refs  = _extract_refs(query)
     fine_intent = _is_fine_intent(query_lower)
+    _cap = CE_MAX_CHARS if CE_MAX_CHARS > 0 else None
 
-    ce = _get_cross_encoder() if use_cross_encoder else None
+    def _combine(r: RetrievedChunk, base: float) -> float:
+        """Điểm cuối = (neural + rule) × temporal × fine × railway × machinery."""
+        rule_b   = _rule_boost(query_lower, query_refs, r.chunk)
+        temporal = _temporal_factor(r.chunk)
+        fine_f   = _fine_intent_factor(r.chunk) if fine_intent else 1.0
+        rail_f   = _railway_mismatch_factor(query_lower, r.chunk)
+        mach_f   = _machinery_mismatch_factor(query_lower, r.chunk)
+        return min(SCORE_CAP, (base + rule_b * RULE_ALPHA) * temporal * fine_f * rail_f * mach_f)
 
+    scored: Optional[list[tuple[RetrievedChunk, float]]] = None
+
+    # ── 1. Remote rerank API (GPU cloud) — ưu tiên nếu cấu hình ──────────────
+    if use_cross_encoder and remote_rerank_available():
+        import time as _time
+        _t0 = _time.time()
+        api_scores = _remote_rerank_scores(query, [r.chunk.text[:_cap] for r in chunks])
+        if api_scores is not None:
+            from loguru import logger
+            logger.info(
+                f"Reranker: remote {RERANK_API_MODEL} "
+                f"{len(chunks)} cặp {_time.time() - _t0:.2f}s"
+            )
+            scored = [(r, _combine(r, s)) for r, s in zip(chunks, api_scores)]
+
+    # ── 2. CrossEncoder local ─────────────────────────────────────────────────
+    ce = _get_cross_encoder() if (use_cross_encoder and scored is None) else None
     if ce is not None:
         try:
-            pairs  = [[query, r.chunk.text] for r in chunks]
+            pairs  = [[query, r.chunk.text[:_cap]] for r in chunks]
             logits = ce.predict(pairs, batch_size=32, show_progress_bar=False)
-
-            scored: list[tuple[RetrievedChunk, float]] = []
-            for r, logit in zip(chunks, logits):
-                ce_score   = _sigmoid(logit)
-                rule_b     = _rule_boost(query_lower, query_refs, r.chunk)
-                temporal   = _temporal_factor(r.chunk)
-                fine_f     = _fine_intent_factor(r.chunk) if fine_intent else 1.0
-                final      = min(SCORE_CAP, (ce_score + rule_b * RULE_ALPHA) * temporal * fine_f)
-                scored.append((r, final))
-
+            scored = [(r, _combine(r, _sigmoid(logit))) for r, logit in zip(chunks, logits)]
         except Exception as exc:
             from loguru import logger
             logger.warning(f"Reranker: CE predict thất bại ({exc}), fallback rule-based.")
-            ce = None  # trigger fallback below
 
-    if ce is None:
+    # ── 3. Rule-based thuần (lưới cuối / use_cross_encoder=False) ────────────
+    if scored is None:
         scored = []
         for r in chunks:
             rule_b   = _rule_boost(query_lower, query_refs, r.chunk)
             temporal = _temporal_factor(r.chunk)
             fine_f   = _fine_intent_factor(r.chunk) if fine_intent else 1.0
-            adjusted = min(SCORE_CAP, (r.score + rule_b) * temporal * fine_f)
+            rail_f   = _railway_mismatch_factor(query_lower, r.chunk)
+            mach_f   = _machinery_mismatch_factor(query_lower, r.chunk)
+            adjusted = min(SCORE_CAP, (r.score + rule_b) * temporal * fine_f * rail_f * mach_f)
             scored.append((r, adjusted))
 
     scored.sort(key=lambda x: -x[1])

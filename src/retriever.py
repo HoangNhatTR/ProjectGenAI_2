@@ -8,11 +8,15 @@ from typing import TYPE_CHECKING, Any, Optional
 from loguru import logger
 
 KG_TIMEOUT_S = float(os.getenv("KG_TIMEOUT_S", "3.0"))  # giây tối đa cho Neo4j query (Aura cold-call hay vượt 3s → override qua env)
-# Hệ số nhánh KG trong RRF. Đặt 1.0 (ngang vector/BM25, KHÔNG boost) để KG khớp
-# nhầm không hất văng kết quả vector đúng — đo thật cho thấy 1.5 làm Graph RAG tụt
-# trên câu hỏi dạng tình huống (KG noise được đẩy lên top, mất điều đúng). 1.0 vẫn
-# giữ được các ca KG thắng (G9→Đ330, B5→Đ134). Override qua env KG_WEIGHT.
-KG_WEIGHT = float(os.getenv("KG_WEIGHT", "1.0"))
+# ── Trọng số 3 nhánh trong RRF fusion (override qua .env) ─────────────────────
+# score(chunk) = Σ_i  w_i / (RRF_K + rank_i + 1), i ∈ {vector, bm25, kg}.
+# Mặc định cả ba = 1.0 (bình đẳng). Tăng w của nhánh nào = tin nhánh đó hơn.
+# ⚠ ĐỔI TRỌNG SỐ PHẢI ĐO BẰNG scripts.eval_retrieval (harness 34 câu) — bài học
+# dự án: chỉnh ranking theo cảm tính hay hại nhóm khác (KG_WEIGHT=1.5 từng làm
+# Graph RAG tụt: KG noise bị đẩy lên top, mất điều đúng; đã hạ về 1.0).
+VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "1.0"))  # ngữ nghĩa (BGE-M3)
+BM25_WEIGHT   = float(os.getenv("BM25_WEIGHT", "1.0"))    # từ khóa (lexical)
+KG_WEIGHT     = float(os.getenv("KG_WEIGHT", "1.0"))      # đồ thị (Neo4j)
 HYDE_TIMEOUT_S = 8.0  # giây tối đa cho HyDE LLM call
 BM25_TIMEOUT_S = 10.0  # giây tối đa chờ BM25 branch (chạy nền song song vector)
 
@@ -57,13 +61,91 @@ _HYDE_PROMPT = (
 
 _MQ_PROMPT = (
     "Viết lại câu hỏi pháp luật sau thành {n} cách diễn đạt khác nhau để tìm "
-    "văn bản pháp luật Việt Nam, dùng thuật ngữ pháp lý khác câu gốc "
-    "(ví dụ: 'vượt đèn đỏ' → 'không chấp hành hiệu lệnh của đèn tín hiệu giao thông'). "
+    "văn bản pháp luật Việt Nam, dùng thuật ngữ pháp lý chính xác thay cho từ "
+    "đời thường (ví dụ: 'vượt đèn đỏ' → 'không chấp hành hiệu lệnh của đèn tín "
+    "hiệu giao thông'; 'xe máy' → 'xe mô tô, xe gắn máy'; 'bằng lái' → 'giấy "
+    "phép lái xe'; 'đi ngược chiều' → 'đi ngược chiều của đường một chiều'). "
     "Mỗi cách trên 1 dòng, không đánh số, không giải thích.\n\n"
     "Câu hỏi: {query}"
 )
 MQ_TIMEOUT_S = 8.0  # giây tối đa cho LLM sinh paraphrase
 MULTI_QUERY_N = int(os.getenv("MULTI_QUERY_N", "2"))  # số paraphrase (ngoài câu gốc)
+# LLM paraphrase: TẮT mặc định 2026-07-09 (user yêu cầu giảm latency). Bước này
+# gọi LLM qua mạng ~5-15s (nút thắt Retrieve), giá trị recall thêm ÍT so với
+# rule expansion tất định (_RULE_SYNONYMS) vốn đã cứu ca "xe máy vượt đèn đỏ".
+# Bật lại: MQ_LLM_PARAPHRASE=true. Khi tắt, multi-query = gốc + rule variant.
+MQ_LLM_PARAPHRASE = os.getenv("MQ_LLM_PARAPHRASE", "false").lower() == "true"
+# Recall guard: top-N đầu bảng của MỖI query variant được bảo lưu suất trong
+# pool sau fusion. RRF đồng thuận pha loãng chunk chỉ xuất hiện ở 1 list
+# (đo 2026-07-08: rule query tìm đúng Đ7K7 NĐ168 top-1 nhưng fused loại nó
+# vì 3 list kia không có) — reranker sẽ quyết thứ hạng cuối, guard chỉ đảm
+# bảo ứng viên mạnh của từng cách diễn đạt CÓ MẶT để được chấm.
+MQ_HEAD_KEEP = int(os.getenv("MQ_HEAD_KEEP", "3"))
+
+# ── Demote TẦNG RETRIEVAL (trước RRF) ─────────────────────────────────────────
+# Nhãn 'Hết hiệu lực toàn bộ' chỉ demote ở RERANK (×0.5) là QUÁ MUỘN: pool RRF
+# thô đã bị VB cổ lấp chỗ trước khi reranker được nhìn thấy ứng viên đúng (đo
+# 2026-07-08: query đèn tín hiệu hoàn hảo → Đ7K7 NĐ168 hạng 18/20, trên nó là
+# 17 chunk của ~10 NĐ phạt GT 1995-2016 cùng nguyên văn — backfill status từ
+# vbpl 2026-07-08 đã gắn nhãn thật cho các VB này). Demote áp vào TỪNG NHÁNH
+# (vector + BM25) rồi re-sort → RRF xếp hạng trên danh sách đã lành mạnh.
+# Tắt: RETRIEVAL_EXPIRED_FACTOR=1.0 (railway theo RAILWAY_MISMATCH_FACTOR).
+RETRIEVAL_EXPIRED_FACTOR = float(os.getenv("RETRIEVAL_EXPIRED_FACTOR", "0.5"))
+# Sai miền đường thủy/hàng hải: VB xử phạt đường thủy (139/2021 HIỆN HÀNH nên
+# không gắn nhãn hết hiệu lực được) cũng nói về "đèn tín hiệu" → lọt pool câu
+# hỏi đường bộ. Nhận diện theo TITLE văn bản, chỉ demote khi query không nhắc
+# gì tới sông nước. Tắt: WATERWAY_MISMATCH_FACTOR=1.0
+WATERWAY_MISMATCH_FACTOR = float(os.getenv("WATERWAY_MISMATCH_FACTOR", "0.8"))
+# 'thủy' (dấu trên u) vs 'thuỷ' (dấu trên y) — corpus có cả hai cách bỏ dấu
+_WATERWAY_RE = re.compile(
+    r"đường\s+th(?:ủy|uỷ)|hàng\s+hải|tàu\s+thuyền|thuyền|phà\b|cảng\b", re.IGNORECASE
+)
+
+
+def _stale_factor(query_lower: str, chunk: "Chunk") -> float:
+    """Hệ số demote tầng retrieval: VB hết hiệu lực toàn bộ + sai miền
+    (đường ngang/đường sắt/đường thủy) cho query không thuộc miền đó."""
+    from .reranker import _RAILWAY_RE, _railway_mismatch_factor
+
+    f = 1.0
+    status = (chunk.metadata.status or "").lower()
+    if "hết hiệu lực" in status and "toàn bộ" in status:
+        f *= RETRIEVAL_EXPIRED_FACTOR
+    f *= _railway_mismatch_factor(query_lower, chunk)
+    # Sai miền theo TITLE văn bản (header chunk có thể không nhắc miền):
+    # VB chuyên đường sắt / đường thủy cho query không thuộc miền đó.
+    title = (chunk.metadata.title or "").lower()
+    if title and not _RAILWAY_RE.search(query_lower) and _RAILWAY_RE.search(title):
+        f *= WATERWAY_MISMATCH_FACTOR
+    if WATERWAY_MISMATCH_FACTOR < 1.0 and not _WATERWAY_RE.search(query_lower):
+        if _WATERWAY_RE.search(title):
+            f *= WATERWAY_MISMATCH_FACTOR
+    return f
+
+# ── Rule-based legal synonym expansion (TẤT ĐỊNH) ─────────────────────────────
+# LLM paraphrase (dù temperature=0) qua API vẫn KHÔNG tất định giữa các lần
+# chạy → thỉnh thoảng thiếu biến thể thuật ngữ luật làm rớt recall (đo
+# 2026-07-08: "Xe máy vượt đèn đỏ thì..." cùng câu lúc PASS lúc FAIL tùy
+# paraphrase). Bảng thay thế này áp bằng CODE → biến thể pháp lý LUÔN có mặt
+# trong multi-query, không phụ thuộc "tâm trạng" LLM.
+_RULE_SYNONYMS: list[tuple[str, str]] = [
+    ("vượt đèn đỏ", "không chấp hành hiệu lệnh của đèn tín hiệu giao thông"),
+    ("xe máy", "xe mô tô, xe gắn máy"),
+    ("bằng lái", "giấy phép lái xe"),
+    ("đi ngược chiều", "đi ngược chiều của đường một chiều"),
+    ("nồng độ cồn", "nồng độ cồn trong máu hoặc hơi thở"),
+]
+
+
+def _rule_expand(query: str) -> Optional[str]:
+    """Thay từ đời thường bằng thuật ngữ pháp lý; None nếu không có gì để thay."""
+    out = query
+    hit = False
+    for coll, legal in _RULE_SYNONYMS:
+        if coll in out.lower():
+            out = re.sub(re.escape(coll), legal, out, flags=re.IGNORECASE)
+            hit = True
+    return out if hit else None
 
 
 def _parse_paraphrases(raw: str, original: str, n: int) -> list[str]:
@@ -85,7 +167,14 @@ def _parse_paraphrases(raw: str, original: str, n: int) -> list[str]:
 def _fuse_ranked_lists(
     lists: list[list[RetrievedChunk]], top_k: int, k: int = DEFAULT_RRF_K,
 ) -> list[RetrievedChunk]:
-    """RRF gộp nhiều danh sách đã xếp hạng (fusion GIỮA các query, không phải branch)."""
+    """RRF gộp nhiều danh sách đã xếp hạng (fusion GIỮA các query, không phải branch).
+
+    Score = MEAN-RRF (chia số danh sách): thứ hạng y hệt sum-RRF nhưng thang điểm
+    giữ nguyên như single-query. Sum-RRF từng làm top score vượt ce_threshold
+    (0.04) → smart-skip TẮT NHẦM CrossEncoder trên mọi query multi-query
+    (phát hiện 2026-07-08: đúng chunk NĐ 168 vào pool nhưng CE không chạy
+    để kéo lên top).
+    """
     scores: dict[str, float] = {}
     chunks_by_id: dict = {}
     for lst in lists:
@@ -93,8 +182,9 @@ def _fuse_ranked_lists(
             cid = r.chunk.chunk_id
             scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
             chunks_by_id.setdefault(cid, r.chunk)
+    n = max(1, len(lists))
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:top_k]
-    return [RetrievedChunk(chunk=chunks_by_id[cid], score=s) for cid, s in ranked]
+    return [RetrievedChunk(chunk=chunks_by_id[cid], score=s / n) for cid, s in ranked]
 
 
 class Retriever:
@@ -136,7 +226,13 @@ class Retriever:
         # Persistent executor — tránh tạo/hủy thread pool trên mỗi query
         self._kg_executor = ThreadPoolExecutor(max_workers=1)
         self._hyde_executor = ThreadPoolExecutor(max_workers=1)
-        self._bm25_executor = ThreadPoolExecutor(max_workers=1)
+        # 4 workers: multi-query chạy tối đa 4 retrieve song song (gốc + rule +
+        # 2 paraphrase), mỗi cái submit 1 BM25 job — ít worker sẽ serialize
+        # khiến job sau dễ hụt BM25_TIMEOUT_S.
+        self._bm25_executor = ThreadPoolExecutor(max_workers=4)
+        # Multi-query: retrieve câu gốc + rule + các paraphrase song song (I/O
+        # OpenSearch overlap; encode BGE-M3 chia core nhưng wall-time ≤ tuần tự).
+        self._mq_executor = ThreadPoolExecutor(max_workers=4)
         # REFERS_TO expansion sau fusion: bám điều ANCHOR trong kết quả đã fuse (nơi
         # vector tìm được), đi theo cạnh dẫn chiếu kéo thêm điều liên quan. Env-toggle.
         self.expand_refers = os.getenv("KG_EXPAND_REFERS", "1") not in ("0", "false", "False", "")
@@ -227,6 +323,17 @@ class Retriever:
             query_embedding, top_k=candidate_k, where=vec_filter
         )
 
+        # Demote tầng retrieval: VB hết hiệu lực toàn bộ / đường ngang sai miền
+        # xuống đáy nhánh vector TRƯỚC khi RRF nhìn thấy thứ hạng.
+        _ql = query.lower()
+        vector_results = sorted(
+            (
+                RetrievedChunk(chunk=r.chunk, score=r.score * _stale_factor(_ql, r.chunk))
+                for r in vector_results
+            ),
+            key=lambda r: -r.score,
+        )
+
         # Vector-only mode (không có nhánh nào khác chạy nền)
         if not bm25_available and not kg_available:
             results = vector_results[:top_k]
@@ -245,6 +352,12 @@ class Retriever:
                 logger.warning(f"BM25 branch timeout sau {BM25_TIMEOUT_S}s, bỏ qua BM25")
             except Exception as exc:
                 logger.warning(f"BM25 collect lỗi, bỏ qua BM25: {exc}")
+        if bm25_results:
+            # Cùng demote như nhánh vector — RRF dùng THỨ HẠNG nên phải re-sort
+            bm25_results = sorted(
+                ((c, s * _stale_factor(_ql, c)) for c, s in bm25_results),
+                key=lambda t: -t[1],
+            )
 
         # ── Branch 3: thu KG (đã chạy nền, hard timeout) ───────────────────────
         kg_chunks: list[Chunk] = []
@@ -354,10 +467,13 @@ class Retriever:
             return []
 
         def _call() -> str:
+            # temperature=0: paraphrase TẤT ĐỊNH — cùng câu hỏi ra cùng pool,
+            # câu trả lời ổn định giữa các lần (prompt đã ép n cách KHÁC NHAU
+            # nên temp 0 vẫn đủ đa dạng; temp 0.4 cũ làm ranking dao động).
             response = self.llm_client.chat(
                 model=model,
                 messages=[{"role": "user", "content": _MQ_PROMPT.format(n=n, query=query)}],
-                options={"temperature": 0.4, "num_ctx": 512},
+                options={"temperature": 0.0, "num_ctx": 512},
             )
             return response["message"]["content"]
 
@@ -388,24 +504,90 @@ class Retriever:
         và không parent expansion (expand 1 lần SAU khi fuse — expand trước sẽ
         dedup theo parent_id làm lệch rank giữa các list).
         """
-        paraphrases = self._paraphrase_queries(query, MULTI_QUERY_N)
-        if not paraphrases:
-            return None
-        logger.info(f"Multi-query: +{len(paraphrases)} paraphrase → RRF fusion")
-
         common: dict[str, Any] = dict(
             filters=filters, min_score=min_score, allowed_sources=allowed_sources,
             use_multi_query=False, use_parent_expansion=False, rrf_k=rrf_k,
         )
-        lists = [
-            self.retrieve(query, top_k=top_k, use_kg=use_kg, use_hyde=use_hyde, **common)
-        ]
-        for pq in paraphrases:
-            lists.append(
-                self.retrieve(pq, top_k=top_k, use_kg=False, use_hyde=False, **common)
-            )
 
-        fused = _fuse_ranked_lists(lists, top_k, k=rrf_k if rrf_k is not None else self.rrf_k)
+        # Retrieve câu GỐC chạy nền NGAY — song song với LLM sinh paraphrase
+        # (hai việc độc lập; tuần tự như cũ phí ~4-8s chờ LLM rồi mới retrieve).
+        orig_future = self._mq_executor.submit(
+            self.retrieve, query, top_k=top_k, use_kg=use_kg, use_hyde=use_hyde, **common,
+        )
+
+        # Biến thể RULE (thuật ngữ luật) — TẤT ĐỊNH, không phụ thuộc LLM, chạy
+        # song song luôn. Lưới an toàn recall cho các cặp từ đời thường↔pháp lý
+        # đã biết ("xe máy" → "xe mô tô, xe gắn máy") — LLM paraphrase lúc sinh
+        # ra biến thể này lúc không (đo 2026-07-08: cùng câu lúc PASS lúc FAIL).
+        rule_q = _rule_expand(query)
+        rule_future = (
+            self._mq_executor.submit(
+                self.retrieve, rule_q, top_k=top_k, use_kg=False, use_hyde=False, **common,
+            )
+            if rule_q else None
+        )
+
+        # LLM paraphrase (tùy chọn — mặc định TẮT để giảm latency ~5-15s)
+        paraphrases = self._paraphrase_queries(query, MULTI_QUERY_N) if MQ_LLM_PARAPHRASE else []
+        # Bỏ paraphrase trùng biến thể rule (đỡ 1 lần retrieve vô ích)
+        if rule_q:
+            paraphrases = [p for p in paraphrases if p.strip().lower() != rule_q.strip().lower()]
+        if not paraphrases and rule_future is None:
+            # Không có biến thể nào → dùng luôn kết quả câu gốc đang chạy nền
+            # (tương đương đường retrieve thường, đừng bỏ phí rồi retrieve lại).
+            try:
+                base = orig_future.result()
+            except Exception as exc:
+                logger.warning(f"Multi-query: retrieve câu gốc lỗi: {exc}")
+                return None
+            if use_parent_expansion and self.parent_store:
+                base = self._expand_to_parents(base)
+            return base
+        logger.info(
+            f"Multi-query: +{len(paraphrases)} paraphrase"
+            f"{' +1 rule' if rule_q else ''} → RRF fusion (song song)"
+        )
+
+        # Các paraphrase retrieve song song với nhau
+        pq_futures = [
+            self._mq_executor.submit(
+                self.retrieve, pq, top_k=top_k, use_kg=False, use_hyde=False, **common,
+            )
+            for pq in paraphrases
+        ]
+        pending = [(orig_future, "gốc")]
+        if rule_future is not None:
+            pending.append((rule_future, "rule"))
+        pending += [(f, "paraphrase") for f in pq_futures]
+
+        lists: list[list[RetrievedChunk]] = []
+        for fut, label in pending:
+            try:
+                lists.append(fut.result())
+            except Exception as exc:
+                logger.warning(f"Multi-query: retrieve câu {label} lỗi, bỏ qua list: {exc}")
+        if not lists:
+            return None
+
+        _k = rrf_k if rrf_k is not None else self.rrf_k
+        fused = _fuse_ranked_lists(lists, top_k, k=_k)
+
+        # Recall guard (MQ_HEAD_KEEP): top đầu mỗi list vào pool với điểm
+        # single-list KHÔNG chia n — ngang chunk đồng thuận tuyệt đối, đảm bảo
+        # ứng viên mạnh của từng cách diễn đạt được reranker chấm.
+        if MQ_HEAD_KEEP > 0 and len(lists) > 1:
+            seen = {r.chunk.chunk_id for r in fused}
+            extras: list[RetrievedChunk] = []
+            for lst in lists:
+                for rank, r in enumerate(lst[:MQ_HEAD_KEEP]):
+                    if r.chunk.chunk_id not in seen:
+                        seen.add(r.chunk.chunk_id)
+                        extras.append(
+                            RetrievedChunk(chunk=r.chunk, score=1.0 / (_k + rank + 1))
+                        )
+            if extras:
+                fused = sorted(fused + extras, key=lambda r: -r.score)[:top_k]
+
         if use_parent_expansion and self.parent_store:
             fused = self._expand_to_parents(fused)
         return fused
@@ -433,6 +615,16 @@ class Retriever:
             return None
 
     # ── Parent expansion ───────────────────────────────────────────────────────
+
+    def expand_parents(self, results: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Expand child chunks về full Điều SAU rerank (pipeline gọi).
+
+        No-op khi không có parent_store. Dedup theo parent_id — caller cắt
+        top_k SAU khi gọi để vẫn đủ số Điều phân biệt.
+        """
+        if not self.parent_store:
+            return results
+        return self._expand_to_parents(results)
 
     def _expand_to_parents(self, results: list[RetrievedChunk]) -> list[RetrievedChunk]:
         """Thay text của child chunks bằng full Điều text từ ParentStore.
@@ -529,18 +721,17 @@ class Retriever:
 
         for rank, (chunk, _) in enumerate(bm25_results):
             cid = chunk.chunk_id
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+            scores[cid] = scores.get(cid, 0.0) + BM25_WEIGHT / (k + rank + 1)
             chunks_by_id.setdefault(cid, chunk)
 
         for rank, r in enumerate(vector_results):
             cid = r.chunk.chunk_id
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+            scores[cid] = scores.get(cid, 0.0) + VECTOR_WEIGHT / (k + rank + 1)
             chunks_by_id.setdefault(cid, r.chunk)
 
-        kg_weight = KG_WEIGHT  # boost structured grounding (override qua env KG_WEIGHT)
         for rank, c in enumerate(kg_chunks):
             cid = c.chunk_id
-            scores[cid] = scores.get(cid, 0.0) + kg_weight / (k + rank + 1)
+            scores[cid] = scores.get(cid, 0.0) + KG_WEIGHT / (k + rank + 1)
             chunks_by_id.setdefault(cid, c)
 
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:top_k]

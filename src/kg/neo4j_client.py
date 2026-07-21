@@ -179,6 +179,23 @@ class Neo4jClient:
           cùng "phạt tiền 800k" có thể xuất hiện ở nhiều luật khác nhau)
         - Relations từ Clause của article tới Offense/Penalty/Subject
         """
+        # LLM đôi khi trả item dạng chuỗi thay vì object (thấy với mimo-v2.5)
+        # → chuẩn hóa: chuỗi thành dict tối thiểu, item khác kiểu thì bỏ,
+        # tránh crash .get() làm mất TOÀN BỘ extraction của điều.
+        def _norm(items, key):
+            out = []
+            for it in items or []:
+                if isinstance(it, dict):
+                    out.append(it)
+                elif isinstance(it, str) and it.strip():
+                    out.append({key: it.strip()})
+            return out
+
+        offenses = [o for o in _norm(offenses, "name") if o.get("name")]
+        subjects = [s2 for s2 in _norm(subjects, "name") if s2.get("name")]
+        penalties = _norm(penalties, "description")
+        relations = [r for r in (relations or []) if isinstance(r, dict)]
+
         with self.session() as s:
             # 1. Offense MERGE theo name
             if offenses:
